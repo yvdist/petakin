@@ -590,9 +590,9 @@ export default function ManualPage() {
             <span className="text-xs text-neutral-500">
               {tool === "rect" && "Drag to draw a box"}
               {tool === "poly" &&
-                "Click = corner · drag = curve · right-click edge = add point · Space = pan"}
+                "Click = corner · drag = curve · exact cursor · Space = pan"}
               {tool === "outline" &&
-                "Trace outer boundary · click/drag curves · Space = pan"}
+                "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "select" &&
                 "Alt-drag edge = curve · click point then ⌫ = delete point · right-click edge = add point"}
             </span>

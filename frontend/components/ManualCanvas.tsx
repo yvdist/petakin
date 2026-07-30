@@ -93,7 +93,12 @@ export default function ManualCanvas({
   const shellV = shellVertsOf(project);
   const tenantStroke = getStroke(project);
   const svgRef = useRef<SVGSVGElement>(null);
+  const contentRef = useRef<SVGGElement>(null);
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
   const [hovered, setHovered] = useState<string | null>(null);
 
   const [rectDraft, setRectDraft] = useState<{ a: Point; b: Point } | null>(null);
@@ -124,16 +129,49 @@ export default function ManualCanvas({
     }
   }, [tool]);
 
-  const toContent = useCallback(
+  /** Screen → SVG user space (viewBox), before pan/zoom group. */
+  const clientToSvg = useCallback(
     (clientX: number, clientY: number): Point => {
       const svg = svgRef.current!;
-      const pt = svg.createSVGPoint();
-      pt.x = clientX;
-      pt.y = clientY;
-      const vb = pt.matrixTransform(svg.getScreenCTM()!.inverse());
-      return [(vb.x - view.tx) / view.scale, (vb.y - view.ty) / view.scale];
+      const rect = svg.getBoundingClientRect();
+      const w = bg.width || 1;
+      const h = bg.height || 1;
+      return [
+        ((clientX - rect.left) / Math.max(1e-6, rect.width)) * w,
+        ((clientY - rect.top) / Math.max(1e-6, rect.height)) * h,
+      ];
     },
-    [view],
+    [bg.width, bg.height],
+  );
+
+  /** Screen → content coords via the pan/zoom group's live CTM (no stale view). */
+  const toContent = useCallback((clientX: number, clientY: number): Point => {
+    const svg = svgRef.current;
+    const g = contentRef.current;
+    if (!svg || !g) return [0, 0];
+    const ctm = g.getScreenCTM();
+    if (!ctm) {
+      const v = viewRef.current;
+      const [x, y] = clientToSvg(clientX, clientY);
+      return [(x - v.tx) / v.scale, (y - v.ty) / v.scale];
+    }
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const p = pt.matrixTransform(ctm.inverse());
+    return [p.x, p.y];
+  }, [clientToSvg]);
+
+  const clientToSvgDelta = useCallback(
+    (dxClient: number, dyClient: number): Point => {
+      const svg = svgRef.current!;
+      const rect = svg.getBoundingClientRect();
+      return [
+        (dxClient / Math.max(1e-6, rect.width)) * (bg.width || 1),
+        (dyClient / Math.max(1e-6, rect.height)) * (bg.height || 1),
+      ];
+    },
+    [bg.width, bg.height],
   );
 
   const snapPoint = useCallback(
@@ -169,9 +207,7 @@ export default function ManualCanvas({
   const onWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const rect = svgRef.current!.getBoundingClientRect();
-      const mx = ((e.clientX - rect.left) / rect.width) * (bg.width || 1);
-      const my = ((e.clientY - rect.top) / rect.height) * (bg.height || 1);
+      const [mx, my] = clientToSvg(e.clientX, e.clientY);
       setView((v) => {
         const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
         const ns = Math.min(40, Math.max(0.05, v.scale * factor));
@@ -179,7 +215,7 @@ export default function ManualCanvas({
         return { scale: ns, tx: mx - k * (mx - v.tx), ty: my - k * (my - v.ty) };
       });
     },
-    [bg.width, bg.height],
+    [clientToSvg],
   );
 
   const beginPan = (e: MouseEvent) => {
@@ -272,8 +308,8 @@ export default function ManualCanvas({
   const onPolyMouseDown = (e: MouseEvent) => {
     if (!drawingPolyLike || e.button !== 0 || spaceHeld.current) return;
     e.stopPropagation();
+    // Exact cursor position — no grid snap while tracing (snap still applies in Select/Rect)
     let c = toContent(e.clientX, e.clientY);
-    c = snapPoint(c);
     if (shiftHeld.current && poly?.verts.length) {
       c = constrain(poly.verts[poly.verts.length - 1].p, c);
     }
@@ -289,9 +325,9 @@ export default function ManualCanvas({
   };
 
   const onMouseMove = (e: MouseEvent) => {
+    // Rubber-band follows raw cursor
     if (drawingPolyLike && poly && drag.current?.mode !== "polyPlace") {
       let cur = toContent(e.clientX, e.clientY);
-      cur = snapPoint(cur);
       if (shiftHeld.current && poly.verts.length) cur = constrain(poly.verts[poly.verts.length - 1].p, cur);
       setPoly({ ...poly, cur });
     }
@@ -304,21 +340,22 @@ export default function ManualCanvas({
 
     if (dstate.mode === "pan") {
       dstate.startClient = { x: e.clientX, y: e.clientY };
-      setView((v) => ({ ...v, tx: v.tx + dxC, ty: v.ty + dyC }));
+      const [dx, dy] = clientToSvgDelta(dxC, dyC);
+      setView((v) => ({ ...v, tx: v.tx + dx, ty: v.ty + dy }));
     } else if (dstate.mode === "rect") {
       let b = toContent(e.clientX, e.clientY);
       b = snapPoint(b);
       setRectDraft({ a: dstate.startContent, b });
     } else if (dstate.mode === "polyPlace") {
       let h = toContent(e.clientX, e.clientY);
-      h = snapPoint(h);
       if (shiftHeld.current) h = constrain(dstate.startContent, h);
       dstate.handleOut = h;
       if (Math.hypot(dxC, dyC) > DRAG_THRESH_PX) setPlacing({ p: dstate.startContent, handleOut: h });
       else setPlacing({ p: dstate.startContent });
     } else if (dstate.mode === "move" && selectedId) {
-      const dx = dxC / view.scale;
-      const dy = dyC / view.scale;
+      const [dxSvg, dySvg] = clientToSvgDelta(dxC, dyC);
+      const dx = dxSvg / view.scale;
+      const dy = dySvg / view.scale;
       setLiveEdit({ id: selectedId, verts: translateVerts(dstate.origVerts, dx, dy) });
     } else if (dstate.mode === "vertex" && selectedId && dstate.vIdx >= 0) {
       let p = toContent(e.clientX, e.clientY);
@@ -626,6 +663,7 @@ export default function ManualCanvas({
         ref={svgRef}
         className={`h-full w-full ${cursorClass}`}
         viewBox={`0 0 ${bg.width || 1} ${bg.height || 1}`}
+        preserveAspectRatio="none"
         onWheel={onWheel}
         onContextMenu={onContextMenu}
         onMouseDown={(e) => {
@@ -650,7 +688,10 @@ export default function ManualCanvas({
             </clipPath>
           )}
         </defs>
-        <g transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}>
+        <g
+          ref={contentRef}
+          transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}
+        >
           {bg.dataUrl && (
             <image
               href={bg.dataUrl}
