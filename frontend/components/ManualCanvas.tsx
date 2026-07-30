@@ -279,7 +279,25 @@ export default function ManualCanvas({
       }
       if (e.key === "Shift") shiftHeld.current = true;
       if (e.key === "Enter" && drawingPolyLike) closePoly();
-      if (e.key === "Escape") setPoly(null);
+      if (e.key === "Escape") {
+        polyRef.current = null;
+        setPoly(null);
+      }
+      // ⌘Z / Ctrl+Z — undo last vertex while tracing poly or outline
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !e.shiftKey && drawingPolyLike) {
+        const prev = polyRef.current;
+        if (!prev?.pts.length) return;
+        e.preventDefault();
+        const pts = prev.pts.slice(0, -1);
+        if (pts.length === 0) {
+          polyRef.current = null;
+          setPoly(null);
+        } else {
+          const next = { pts, cur: prev.cur };
+          polyRef.current = next;
+          setPoly(next);
+        }
+      }
     };
     const ku = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceHeld.current = false;
@@ -517,8 +535,8 @@ export default function ManualCanvas({
 
       {drawingPolyLike && poly && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
-          {tool === "outline" ? "Outline" : "Polygon"} · {poly.pts.length} pts · double-click or Enter
-          to close · Esc to cancel · Shift = straight
+          {tool === "outline" ? "Outline" : "Polygon"} · {poly.pts.length} pts · ⌘Z undo point ·
+          double-click or Enter to close · Esc cancel · Shift = straight
         </div>
       )}
     </div>

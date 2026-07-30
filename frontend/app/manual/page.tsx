@@ -146,12 +146,15 @@ export default function ManualPage() {
   }, []);
 
   const deleteSelected = useCallback(() => {
+    if (!selectedId) return;
     if (selectedId === SHELL_ID) {
+      if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
       setProject((p) => (p ? { ...p, shell: null } : p));
       setSelectedId(null);
       return;
     }
-    setProject((p) => (p && selectedId ? { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) } : p));
+    if (!confirm("Delete this shape?")) return;
+    setProject((p) => (p ? { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) } : p));
     setSelectedId(null);
   }, [selectedId]);
 
@@ -161,6 +164,7 @@ export default function ManualPage() {
   }, []);
 
   const clearShell = useCallback(() => {
+    if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
     setProject((p) => (p ? { ...p, shell: null } : p));
     if (selectedId === SHELL_ID) setSelectedId(null);
   }, [selectedId]);
