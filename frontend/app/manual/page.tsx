@@ -852,6 +852,7 @@ export default function ManualPage() {
           <div className="relative min-h-0 flex-1">
             {hasImage && project ? (
               <ManualCanvas
+                key={workspace?.activeTabId ?? "tab"}
                 project={project}
                 tool={tool}
                 snap={snap}
