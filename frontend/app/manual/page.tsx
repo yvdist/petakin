@@ -2,6 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import Uploader from "@/components/Uploader";
+import LayersPanel from "@/components/LayersPanel";
 import ManualCanvas, { type Tool } from "@/components/ManualCanvas";
 import type { Category, Point } from "@/lib/types";
 import { CATEGORY_LABEL } from "@/lib/types";
@@ -13,10 +14,15 @@ import {
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
   activeProject,
+  assignShapeToActiveLayer,
+  createLayer,
   defaultFill,
+  deleteLayerNodes,
   emitManualSvg,
   getDrawOpacity,
+  getLayerTree,
   getStroke,
+  groupSelection,
   isManualProject,
   isManualWorkspace,
   loadWorkspace,
@@ -24,13 +30,18 @@ import {
   newProject,
   newShapeId,
   newWorkspace,
+  patchGroup,
+  patchLayer,
+  removeShapeFromLayers,
   removeVert,
   saveWorkspace,
   seedFromGeometry,
+  setActiveLayer,
   shapeVerts,
   shellVertsOf,
   suggestNextFloor,
   syncShapeFromVerts,
+  ungroupedShapeIds,
   SHELL_ID,
   type ManualProject,
   type ManualShape,
@@ -110,6 +121,9 @@ export default function ManualPage() {
   const [drawCat, setDrawCat] = useState<Category>("fnb");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedVertIndex, setSelectedVertIndex] = useState<number | null>(null);
+  const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
+  const [selectedShapeIds, setSelectedShapeIds] = useState<string[]>([]);
+  const [layersOpen, setLayersOpen] = useState(true);
   const [snap, setSnap] = useState(true);
   const [gridSize, setGridSize] = useState(8);
   const [busy, setBusy] = useState(false);
@@ -163,6 +177,8 @@ export default function ManualPage() {
     setWorkspace((ws) => (ws ? { ...ws, activeTabId: id } : ws));
     setSelectedId(null);
     setSelectedVertIndex(null);
+    setSelectedLayerIds([]);
+    setSelectedShapeIds([]);
     setFile(null);
     setTool("select");
   }, []);
@@ -268,7 +284,11 @@ export default function ManualPage() {
     try {
       const geo = await processImage(file, AEON_CONFIG);
       const shapes = seedFromGeometry(geo);
-      updateActive((p) => ({ ...p, shapes: [...p.shapes, ...shapes] }));
+      updateActive((p) => {
+        let next = { ...p, shapes: [...p.shapes, ...shapes] };
+        for (const s of shapes) next = assignShapeToActiveLayer(next, s.id);
+        return next;
+      });
     } catch (e) {
       setError("Seed failed (is the backend running?): " + String(e));
     } finally {
@@ -291,8 +311,9 @@ export default function ManualPage() {
 
   const addShape = useCallback(
     (s: ManualShape) => {
-      updateActive((p) => ({ ...p, shapes: [...p.shapes, s] }));
+      updateActive((p) => assignShapeToActiveLayer({ ...p, shapes: [...p.shapes, s] }, s.id));
       setSelectedId(s.id);
+      setSelectedShapeIds([s.id]);
       setSelectedVertIndex(null);
       setTool("select");
     },
@@ -325,6 +346,8 @@ export default function ManualPage() {
   const selectId = useCallback((id: string | null) => {
     setSelectedId(id);
     setSelectedVertIndex(null);
+    if (id && id !== SHELL_ID) setSelectedShapeIds([id]);
+    else setSelectedShapeIds([]);
   }, []);
 
   const deleteVert = useCallback(() => {
@@ -361,8 +384,14 @@ export default function ManualPage() {
       return;
     }
     if (!confirm("Delete this shape?")) return;
-    updateActive((p) => ({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }));
+    updateActive((p) =>
+      removeShapeFromLayers(
+        { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) },
+        selectedId,
+      ),
+    );
     setSelectedId(null);
+    setSelectedShapeIds([]);
     setSelectedVertIndex(null);
   }, [selectedId, updateActive]);
 
@@ -412,6 +441,96 @@ export default function ManualPage() {
     updateActive((p) => ({ ...p, stroke: { ...getStroke(p), color } }));
   const setStrokeWidth = (width: number) =>
     updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }));
+
+  // ---- layers ----
+  const panelRows = useMemo(() => {
+    if (!project) return [] as string[];
+    const tree = getLayerTree(project);
+    const rows: string[] = [];
+    for (const id of tree.rootOrder) {
+      rows.push(id);
+      const g = tree.groups.find((x) => x.id === id);
+      if (g && !g.collapsed) rows.push(...g.childIds);
+    }
+    for (const l of tree.layers) {
+      if (!tree.rootOrder.includes(l.id) && !tree.groups.some((g) => g.childIds.includes(l.id))) {
+        rows.push(l.id);
+      }
+    }
+    return rows;
+  }, [project]);
+
+  const onSelectLayerRow = useCallback(
+    (id: string, e: React.MouseEvent) => {
+      if (!project) return;
+      const rows = panelRows;
+      if (e.metaKey || e.ctrlKey) {
+        setSelectedLayerIds((prev) =>
+          prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+        );
+        return;
+      }
+      if (e.shiftKey && selectedLayerIds.length > 0) {
+        const last = selectedLayerIds[selectedLayerIds.length - 1];
+        const a = rows.indexOf(last);
+        const b = rows.indexOf(id);
+        if (a >= 0 && b >= 0) {
+          const [lo, hi] = a < b ? [a, b] : [b, a];
+          setSelectedLayerIds(rows.slice(lo, hi + 1));
+          return;
+        }
+      }
+      setSelectedLayerIds([id]);
+      setSelectedShapeIds([]);
+    },
+    [panelRows, project, selectedLayerIds],
+  );
+
+  const onSelectShapeRow = useCallback((id: string, e: React.MouseEvent) => {
+    if (!project) return;
+    const ungrouped = ungroupedShapeIds(project);
+    if (e.metaKey || e.ctrlKey) {
+      setSelectedShapeIds((prev) =>
+        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+      );
+      setSelectedId(id);
+      return;
+    }
+    if (e.shiftKey && selectedShapeIds.length > 0) {
+      const list = ungrouped.length ? ungrouped : project.shapes.map((s) => s.id);
+      const last = selectedShapeIds[selectedShapeIds.length - 1];
+      const a = list.indexOf(last);
+      const b = list.indexOf(id);
+      if (a >= 0 && b >= 0) {
+        const [lo, hi] = a < b ? [a, b] : [b, a];
+        setSelectedShapeIds(list.slice(lo, hi + 1));
+        setSelectedId(id);
+        return;
+      }
+    }
+    setSelectedShapeIds([id]);
+    setSelectedId(id);
+    setSelectedLayerIds([]);
+    setSelectedVertIndex(null);
+  }, [project, selectedShapeIds]);
+
+  const doNewLayer = () => updateActive((p) => createLayer(p));
+  const doGroup = () => {
+    if (!project) return;
+    const ungroupedSel = selectedShapeIds.filter((id) => ungroupedShapeIds(project).includes(id));
+    const layerIds = selectedLayerIds.filter((id) =>
+      getLayerTree(project).layers.some((l) => l.id === id),
+    );
+    updateActive((p) => groupSelection(p, layerIds, ungroupedSel));
+    setSelectedLayerIds([]);
+    setSelectedShapeIds([]);
+  };
+  const doDeleteLayerNodes = () => {
+    if (!selectedLayerIds.length) return;
+    if (!confirm("Remove selected layers/groups? Shapes stay as ungrouped.")) return;
+    updateActive((p) => deleteLayerNodes(p, selectedLayerIds));
+    setSelectedLayerIds([]);
+  };
 
   // ---- export ----
   const doExportSvg = () => {
@@ -922,6 +1041,81 @@ export default function ManualPage() {
               <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white/40 backdrop-blur-[2px]">
                 <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand-soft border-t-brand" />
                 <div className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm">Seeding from auto…</div>
+              </div>
+            )}
+
+            {project && (
+              <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-1">
+                {!layersOpen ? (
+                  <button
+                    type="button"
+                    onClick={() => setLayersOpen(true)}
+                    className="rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-600 shadow-lg ring-1 ring-neutral-200 hover:bg-white"
+                  >
+                    Layers
+                  </button>
+                ) : (
+                  <div className="w-72 overflow-hidden rounded-lg bg-white/95 shadow-xl ring-1 ring-neutral-200 backdrop-blur-sm">
+                    <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50 px-3 py-1.5">
+                      <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+                        Layers
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setLayersOpen(false)}
+                        className="rounded px-1.5 py-0.5 text-xs text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
+                        title="Collapse"
+                      >
+                        ▾
+                      </button>
+                    </div>
+                    <div className="p-2">
+                      <LayersPanel
+                        project={project}
+                        selectedLayerIds={selectedLayerIds}
+                        selectedShapeIds={selectedShapeIds}
+                        onSelectLayer={onSelectLayerRow}
+                        onSelectShape={onSelectShapeRow}
+                        onToggleLayerVisible={(id) => {
+                          const l = getLayerTree(project).layers.find((x) => x.id === id);
+                          if (l) updateActive((p) => patchLayer(p, id, { visible: !l.visible }));
+                        }}
+                        onToggleLayerLocked={(id) => {
+                          const l = getLayerTree(project).layers.find((x) => x.id === id);
+                          if (l) updateActive((p) => patchLayer(p, id, { locked: !l.locked }));
+                        }}
+                        onToggleGroupVisible={(id) => {
+                          const g = getLayerTree(project).groups.find((x) => x.id === id);
+                          if (g) updateActive((p) => patchGroup(p, id, { visible: !g.visible }));
+                        }}
+                        onToggleGroupLocked={(id) => {
+                          const g = getLayerTree(project).groups.find((x) => x.id === id);
+                          if (g) updateActive((p) => patchGroup(p, id, { locked: !g.locked }));
+                        }}
+                        onToggleGroupCollapsed={(id) => {
+                          const g = getLayerTree(project).groups.find((x) => x.id === id);
+                          if (g) updateActive((p) => patchGroup(p, id, { collapsed: !g.collapsed }));
+                        }}
+                        onRenameLayer={(id) => {
+                          const l = getLayerTree(project).layers.find((x) => x.id === id);
+                          if (!l) return;
+                          const name = window.prompt("Layer name", l.name);
+                          if (name != null && name.trim()) updateActive((p) => patchLayer(p, id, { name: name.trim() }));
+                        }}
+                        onRenameGroup={(id) => {
+                          const g = getLayerTree(project).groups.find((x) => x.id === id);
+                          if (!g) return;
+                          const name = window.prompt("Group name", g.name);
+                          if (name != null && name.trim()) updateActive((p) => patchGroup(p, id, { name: name.trim() }));
+                        }}
+                        onNewLayer={doNewLayer}
+                        onGroup={doGroup}
+                        onDeleteNodes={doDeleteLayerNodes}
+                        onSetActiveLayer={(id) => updateActive((p) => setActiveLayer(p, id))}
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
             )}
           </div>

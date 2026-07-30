@@ -10,7 +10,10 @@ import {
   getDrawOpacity,
   getStroke,
   insertVertOnEdge,
+  isShapeLocked,
+  isShapeVisible,
   nearestEdge,
+  orderedShapeIds,
   pathDFromVerts,
   pickBendEdge,
   shapeVerts,
@@ -97,6 +100,9 @@ export default function ManualCanvas({
   const shellV = shellVertsOf(project);
   const tenantStroke = getStroke(project);
   const drawOpacity = getDrawOpacity(project);
+  const paintOrder = orderedShapeIds(project)
+    .map((id) => shapes.find((s) => s.id === id))
+    .filter((s): s is ManualShape => !!s && isShapeVisible(project, s.id));
   const svgRef = useRef<SVGSVGElement>(null);
   const contentRef = useRef<SVGGElement>(null);
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
@@ -601,6 +607,10 @@ export default function ManualCanvas({
 
     // Alt + drag on fill/edge → bend (prefer outgoing from selected point)
     if (e.altKey || altHeld.current) {
+      if (id !== SHELL_ID && isShapeLocked(project, id)) {
+        onSelect(id);
+        return;
+      }
       const c = toContent(e.clientX, e.clientY);
       const prefer = id === selectedId ? selectedVertIndex : null;
       const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer);
@@ -622,6 +632,8 @@ export default function ManualCanvas({
 
     onSelect(id);
     onSelectVert(null);
+    // Locked shapes: select only, no drag-move
+    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
     drag.current = {
       mode: "move",
       startClient: { x: e.clientX, y: e.clientY },
@@ -739,7 +751,7 @@ export default function ManualCanvas({
             )}
 
             <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
-              {shapes.map((s) => {
+              {paintOrder.map((s) => {
                 const verts = liveVertsFor(s.id, shapeVerts(s));
                 return (
                   <path
@@ -751,7 +763,7 @@ export default function ManualCanvas({
                   />
                 );
               })}
-              {shapes.map((s) => {
+              {paintOrder.map((s) => {
                 const verts = liveVertsFor(s.id, shapeVerts(s));
                 const isSel = s.id === selectedId;
                 const isHov = hovered === s.id;
@@ -789,15 +801,16 @@ export default function ManualCanvas({
           </g>
 
           {tool === "select" &&
-            shapes.map((s) => {
+            paintOrder.map((s) => {
               const verts = liveVertsFor(s.id, shapeVerts(s));
+              const locked = isShapeLocked(project, s.id);
               return (
                 <path
                   key={`h-${s.id}`}
                   d={pathDFromVerts(verts)}
                   fill="transparent"
                   stroke="none"
-                  className="cursor-move"
+                  className={locked ? "cursor-default" : "cursor-move"}
                   onMouseEnter={() => setHovered(s.id)}
                   onMouseLeave={() => setHovered(null)}
                   onClick={(e) => e.stopPropagation()}
