@@ -156,7 +156,7 @@ export default function Home() {
 
   // ---- presets ----
   const doSavePreset = () => {
-    const name = prompt("Preset name:", "AEON Tebrau City");
+    const name = prompt("Preset name:", "My mall");
     if (!name) return;
     setPresets(savePreset({ name, config: cloneConfig(config) }));
   };
@@ -188,13 +188,13 @@ export default function Home() {
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-4 py-2">
         <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-pink-600">Petakin</span>
+          <span className="text-lg font-bold text-ink">Petakin</span>
           <span className="text-xs text-neutral-400">Floor Plan → Flat SVG</span>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          {busy && <span className="text-pink-600">Processing…</span>}
+          {busy && <span className="text-brand">Processing…</span>}
           {error && <span className="max-w-md truncate text-red-600" title={error}>{error}</span>}
-          <Link href="/manual" className="rounded bg-pink-600 px-3 py-1 text-white hover:bg-pink-500">
+          <Link href="/manual" className="rounded bg-brand px-3 py-1 text-white hover:bg-brand-hover">
             Manual mode
           </Link>
           <Link href="/batch" className="rounded bg-neutral-800 px-3 py-1 text-white hover:bg-neutral-700">
@@ -222,7 +222,7 @@ export default function Home() {
                 onChange={(e) =>
                   patchConfig((c) => ({ ...c, rectangularize: e.target.checked }))
                 }
-                className="accent-pink-600"
+                className="accent-brand"
               />
               Rectangularize tenant boxes (crisp rectangles)
             </label>
@@ -263,9 +263,9 @@ export default function Home() {
               <button onClick={() => file && runProcess(file, config)} disabled={!file}
                 className="flex-1 rounded bg-neutral-200 px-2 py-1.5 text-sm disabled:opacity-40">Reprocess</button>
               <button onClick={doExportSvg} disabled={!geometry}
-                className="flex-1 rounded bg-pink-600 px-2 py-1.5 text-sm text-white disabled:opacity-40">Export SVG</button>
+                className="flex-1 rounded bg-brand px-2 py-1.5 text-sm text-white hover:bg-brand-hover disabled:opacity-40">Export SVG</button>
               <button onClick={doExportPng} disabled={!geometry}
-                className="flex-1 rounded bg-pink-500 px-2 py-1.5 text-sm text-white disabled:opacity-40">Export PNG</button>
+                className="flex-1 rounded bg-brand-hover px-2 py-1.5 text-sm text-white disabled:opacity-40">Export PNG</button>
             </div>
           </Section>
 
@@ -283,7 +283,7 @@ export default function Home() {
             </label>
             {showUnderlay && (
               <input type="range" min={0.1} max={1} step={0.05} value={underlayOpacity}
-                onChange={(e) => setUnderlayOpacity(Number(e.target.value))} className="w-24 accent-pink-600" />
+                onChange={(e) => setUnderlayOpacity(Number(e.target.value))} className="w-24 accent-brand" />
             )}
             <div className="flex-1" />
             {selected.size > 0 && (
@@ -348,7 +348,7 @@ export default function Home() {
             {/* reprocess overlay — stale SVG stays visible (dimmed) underneath */}
             {busy && geometry && (
               <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white/40 backdrop-blur-[2px]">
-                <div className="h-10 w-10 animate-spin rounded-full border-4 border-pink-200 border-t-pink-600" />
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand-soft border-t-brand" />
                 <div className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm">
                   Processing… (high quality)
                 </div>

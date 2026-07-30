@@ -1,8 +1,18 @@
 @import "tailwindcss";
 
+/* Petakin brand — drafting desk (ink + signal teal) */
+@theme {
+  --color-brand: #0d9488;
+  --color-brand-hover: #0f766e;
+  --color-brand-soft: #ccfbf1;
+  --color-ink: #0f172a;
+  --font-sans: var(--font-ibm-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-ibm-plex-mono), ui-monospace, monospace;
+}
+
 html,
 body {
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
 }
 
 /* checkerboard to visualize SVG transparency */

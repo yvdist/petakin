@@ -243,11 +243,11 @@ export default function ManualPage() {
     <div className="flex h-screen flex-col">
       <header className="flex items-center justify-between border-b border-neutral-200 bg-white px-4 py-2">
         <div className="flex items-center gap-2">
-          <span className="text-lg font-bold text-pink-600">Petakin</span>
+          <span className="text-lg font-bold text-ink">Petakin</span>
           <span className="text-xs text-neutral-400">Manual Mapping</span>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          {busy && <span className="text-pink-600">Seeding…</span>}
+          {busy && <span className="text-brand">Seeding…</span>}
           <span className="text-xs text-neutral-400">
             {saved === "saving" ? "Saving…" : saved === "saved" ? "Autosaved" : ""}
           </span>
@@ -280,7 +280,7 @@ export default function ManualPage() {
                   key={t.key}
                   onClick={() => setTool(t.key)}
                   className={`flex-1 rounded px-2 py-1.5 text-sm ${
-                    tool === t.key ? "bg-pink-600 text-white" : "bg-neutral-200 text-neutral-700"
+                    tool === t.key ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
                   }`}
                 >
                   {t.label} <span className="opacity-60">{t.hint}</span>
@@ -294,7 +294,7 @@ export default function ManualPage() {
                   key={c}
                   onClick={() => setDrawCat(c)}
                   className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                    drawCat === c ? "ring-2 ring-pink-500" : "ring-1 ring-neutral-300"
+                    drawCat === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
                   }`}
                 >
                   <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
@@ -303,7 +303,7 @@ export default function ManualPage() {
               ))}
             </div>
             <label className="flex items-center gap-2 text-xs text-neutral-700">
-              <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} className="accent-pink-600" />
+              <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} className="accent-brand" />
               Snap
             </label>
             <label className="mt-2 flex items-center gap-2 text-xs text-neutral-700">
@@ -329,7 +329,7 @@ export default function ManualPage() {
                     key={c}
                     onClick={() => patchShape(selShape.id, { category: c, fill: defaultFill(c) })}
                     className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                      selShape.category === c ? "ring-2 ring-pink-500" : "ring-1 ring-neutral-300"
+                      selShape.category === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
                     }`}
                   >
                     <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
@@ -375,9 +375,9 @@ export default function ManualPage() {
           <Section title="Export">
             <div className="flex gap-2">
               <button onClick={doExportSvg} disabled={!project || !project.shapes.length}
-                className="flex-1 rounded bg-pink-600 px-2 py-1.5 text-sm text-white disabled:opacity-40">Export SVG</button>
+                className="flex-1 rounded bg-brand px-2 py-1.5 text-sm text-white hover:bg-brand-hover disabled:opacity-40">Export SVG</button>
               <button onClick={doExportPng} disabled={!project || !project.shapes.length}
-                className="flex-1 rounded bg-pink-500 px-2 py-1.5 text-sm text-white disabled:opacity-40">Export PNG</button>
+                className="flex-1 rounded bg-brand-hover px-2 py-1.5 text-sm text-white disabled:opacity-40">Export PNG</button>
             </div>
             <div className="mt-2 text-xs text-neutral-400">{project?.shapes.length ?? 0} shapes</div>
           </Section>
@@ -395,7 +395,7 @@ export default function ManualPage() {
                 step={0.05}
                 value={project?.bg.opacity ?? 0.4}
                 onChange={(e) => setOpacity(Number(e.target.value))}
-                className="w-28 accent-pink-600"
+                className="w-28 accent-brand"
                 disabled={!hasImage}
               />
             </label>
@@ -428,7 +428,7 @@ export default function ManualPage() {
 
             {busy && (
               <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white/40 backdrop-blur-[2px]">
-                <div className="h-10 w-10 animate-spin rounded-full border-4 border-pink-200 border-t-pink-600" />
+                <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand-soft border-t-brand" />
                 <div className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm">Seeding from auto…</div>
               </div>
             )}

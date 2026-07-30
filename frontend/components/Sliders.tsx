@@ -45,7 +45,7 @@ export default function Sliders({
             step={r.step}
             value={config[r.key] as number}
             onChange={(e) => onChange(r.key, Number(e.target.value))}
-            className="w-full accent-pink-600"
+            className="w-full accent-brand"
           />
         </label>
       ))}

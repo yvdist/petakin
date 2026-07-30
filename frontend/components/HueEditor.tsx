@@ -17,7 +17,7 @@ export default function HueEditor({
     <div>
       <button
         onClick={() => setOpen((o) => !o)}
-        className="mb-2 text-xs font-medium text-pink-600 hover:underline"
+        className="mb-2 text-xs font-medium text-brand hover:underline"
       >
         {open ? "▾ Hide hue lists" : "▸ Edit hue lists"}
       </button>

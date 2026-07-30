@@ -73,7 +73,7 @@ export default function BatchPage() {
   return (
     <div className="mx-auto max-w-3xl p-6">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-xl font-bold text-pink-600">Petakin — Batch mode</h1>
+        <h1 className="text-xl font-bold text-ink">Petakin — Batch mode</h1>
         <Link href="/" className="rounded bg-neutral-800 px-3 py-1 text-sm text-white">← Editor</Link>
       </div>
 
@@ -92,7 +92,7 @@ export default function BatchPage() {
           onChange={(e) => e.target.files && addFiles(e.target.files)} />
         <div className="flex-1" />
         <button onClick={run} disabled={!items.length || running}
-          className="rounded bg-pink-600 px-4 py-1.5 text-sm text-white disabled:opacity-40">
+          className="rounded bg-brand px-4 py-1.5 text-sm text-white hover:bg-brand-hover disabled:opacity-40">
           {running ? "Processing…" : "Process & download ZIP"}
         </button>
       </div>
@@ -108,7 +108,7 @@ export default function BatchPage() {
             <span className={
               it.status === "done" ? "text-emerald-600" :
               it.status === "error" ? "text-red-600" :
-              it.status === "processing" ? "text-pink-600" : "text-neutral-400"
+              it.status === "processing" ? "text-brand" : "text-neutral-400"
             }>
               {it.status === "done" ? `${it.units} units` : it.status}
             </span>
