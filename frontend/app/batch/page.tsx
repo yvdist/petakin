@@ -74,7 +74,7 @@ export default function BatchPage() {
     <div className="mx-auto max-w-3xl p-6">
       <div className="mb-4 flex items-center justify-between">
         <h1 className="text-xl font-bold text-ink">Petakin — Batch mode</h1>
-        <Link href="/" className="rounded bg-neutral-800 px-3 py-1 text-sm text-white">← Editor</Link>
+        <Link href="/auto" className="rounded bg-neutral-800 px-3 py-1 text-sm text-white">← Editor</Link>
       </div>
 
       <p className="mb-4 text-sm text-neutral-600">

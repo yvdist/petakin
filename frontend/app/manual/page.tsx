@@ -744,7 +744,7 @@ export default function ManualPage() {
             {saved === "saving" ? "Saving…" : saved === "saved" ? "Autosaved" : ""}
           </span>
           {error && <span className="max-w-md truncate text-red-600" title={error}>{error}</span>}
-          <Link href="/" className="rounded bg-neutral-800 px-3 py-1 text-white hover:bg-neutral-700">
+          <Link href="/auto" className="rounded bg-neutral-800 px-3 py-1 text-white hover:bg-neutral-700">
             Auto mode
           </Link>
         </div>

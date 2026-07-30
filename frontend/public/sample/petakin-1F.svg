@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1826 1024" width="1826" height="1024">
+  <g id="shell">
+    <path id="shell-1" d="M60 120 H1766 V904 H60 Z" fill="#ECECEC" stroke="#ffffff" stroke-width="3"/>
+  </g>
+  <g id="units">
+    <g id="cat-zone">
+      <path id="zone-01" d="M90 150 H520 V470 H90 Z" fill="#F2E888" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-specialty">
+      <path id="specialty-01" d="M540 150 H760 V360 H540 Z" fill="#4FBBE8" stroke="#ffffff" stroke-width="3"/>
+      <path id="specialty-02" d="M90 500 H360 V870 H90 Z" fill="#4FBBE8" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-fashion">
+      <path id="fashion-01" d="M780 150 H1040 V360 H780 Z" fill="#8CC63F" stroke="#ffffff" stroke-width="3"/>
+      <path id="fashion-02" d="M780 500 H1120 V720 H780 Z" fill="#8CC63F" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-fnb">
+      <path id="fnb-01" d="M1060 150 H1300 V360 H1060 Z" fill="#E8842E" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-services">
+      <path id="services-01" d="M380 500 H760 V870 H380 Z" fill="#A97FD1" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-anchor">
+      <path id="anchor-01" d="M1320 150 H1746 V620 H1320 Z" fill="#F2A7CB" stroke="#ffffff" stroke-width="3"/>
+    </g>
+    <g id="cat-vacant">
+      <path id="vacant-01" d="M1140 500 H1300 V720 H1140 Z" fill="#9E9E9E" stroke="#ffffff" stroke-width="3"/>
+    </g>
+  </g>
+  <g id="badge">
+    <circle cx="1690" cy="840" r="34" fill="none" stroke="#E5187F" stroke-width="3"/>
+    <text x="1690" y="852" font-family="monospace" font-size="30" fill="#E5187F" text-anchor="middle">1F</text>
+  </g>
+</svg>
