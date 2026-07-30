@@ -131,6 +131,7 @@ export default function ManualPage() {
   const [saved, setSaved] = useState<"idle" | "saving" | "saved">("idle");
   const importRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const editorHostRef = useRef<HTMLDivElement>(null);
 
   const project = useMemo(() => activeProject(workspace), [workspace]);
   const activeTabTitle = useMemo(() => {
@@ -184,6 +185,7 @@ export default function ManualPage() {
     setSelectedShapeIds([]);
     setFile(null);
     setTool("select");
+    if (editorHostRef.current) editorHostRef.current.scrollTop = 0;
   }, []);
 
   const switchTab = useCallback(
@@ -935,7 +937,7 @@ export default function ManualPage() {
         </aside>
 
         {/* RIGHT — editor */}
-        <main className="relative flex min-w-0 flex-1 flex-col">
+        <main className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
           {/* Tab bar */}
           <div className="flex items-stretch gap-0.5 overflow-x-auto border-b border-neutral-200 bg-neutral-100 px-1 pt-1">
             {(workspace?.tabs ?? []).map((t) => {
@@ -1022,24 +1024,26 @@ export default function ManualPage() {
             </span>
           </div>
 
-          <div className="relative min-h-0 flex-1">
+          <div ref={editorHostRef} className="relative min-h-0 flex-1 overflow-hidden">
             {hasImage && project ? (
-              <ManualCanvas
-                key={workspace?.activeTabId ?? "tab"}
-                project={project}
-                tool={tool}
-                snap={snap}
-                gridSize={gridSize}
-                selectedId={selectedId}
-                selectedVertIndex={selectedVertIndex}
-                makeShape={makeShape}
-                onSelect={selectId}
-                onSelectVert={setSelectedVertIndex}
-                onAddShape={addShape}
-                onUpdateShapeVerts={updateShapeVerts}
-                onSetShell={setShell}
-                onRequestTool={setTool}
-              />
+              <div className="absolute inset-0">
+                <ManualCanvas
+                  key={workspace?.activeTabId ?? "tab"}
+                  project={project}
+                  tool={tool}
+                  snap={snap}
+                  gridSize={gridSize}
+                  selectedId={selectedId}
+                  selectedVertIndex={selectedVertIndex}
+                  makeShape={makeShape}
+                  onSelect={selectId}
+                  onSelectVert={setSelectedVertIndex}
+                  onAddShape={addShape}
+                  onUpdateShapeVerts={updateShapeVerts}
+                  onSetShell={setShell}
+                  onRequestTool={setTool}
+                />
+              </div>
             ) : (
               <div className="flex h-full items-center justify-center text-neutral-400">
                 Upload a denah to start drawing.
