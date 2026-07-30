@@ -53,6 +53,8 @@ export interface ManualLayer {
   locked: boolean;
   visible: boolean;
   shapeIds: string[];
+  /** Hide shape list in the layers panel. */
+  collapsed?: boolean;
 }
 
 export interface ManualLayerGroup {
@@ -226,7 +228,7 @@ export function removeShapeFromLayers(project: ManualProject, shapeId: string): 
 export function patchLayer(
   project: ManualProject,
   layerId: string,
-  patch: Partial<Pick<ManualLayer, "name" | "locked" | "visible">>,
+  patch: Partial<Pick<ManualLayer, "name" | "locked" | "visible" | "collapsed">>,
 ): ManualProject {
   const p = ensureLayerTree(project);
   return {
@@ -373,6 +375,148 @@ export function moveShapesToLayer(
     return { ...l, shapeIds: without };
   });
   return { ...p, layerTree: { ...tree, layers } };
+}
+
+export function setRootOrder(project: ManualProject, rootOrder: string[]): ManualProject {
+  const p = ensureLayerTree(project);
+  return { ...p, layerTree: { ...p.layerTree!, rootOrder: [...rootOrder] } };
+}
+
+export function setGroupChildIds(
+  project: ManualProject,
+  groupId: string,
+  childIds: string[],
+): ManualProject {
+  const p = ensureLayerTree(project);
+  if (!groupById(p.layerTree!, groupId)) return project;
+  return {
+    ...p,
+    layerTree: {
+      ...p.layerTree!,
+      groups: p.layerTree!.groups.map((g) =>
+        g.id === groupId ? { ...g, childIds: [...childIds] } : g,
+      ),
+    },
+  };
+}
+
+export function setLayerShapeIds(
+  project: ManualProject,
+  layerId: string,
+  shapeIds: string[],
+): ManualProject {
+  const p = ensureLayerTree(project);
+  if (!layerById(p.layerTree!, layerId)) return project;
+  return {
+    ...p,
+    layerTree: {
+      ...p.layerTree!,
+      layers: p.layerTree!.layers.map((l) =>
+        l.id === layerId ? { ...l, shapeIds: [...shapeIds] } : l,
+      ),
+    },
+  };
+}
+
+export type LayerMoveTarget = { type: "root" } | { type: "group"; groupId: string };
+
+/** Pull a layer out of root/groups and insert into target at model index. */
+export function moveLayer(
+  project: ManualProject,
+  layerId: string,
+  target: LayerMoveTarget,
+  indexModel: number,
+): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  if (!layerById(tree, layerId)) return project;
+  if (target.type === "group" && !groupById(tree, target.groupId)) return project;
+
+  let rootOrder = tree.rootOrder.filter((id) => id !== layerId);
+  let groups = tree.groups.map((g) => ({
+    ...g,
+    childIds: g.childIds.filter((id) => id !== layerId),
+  }));
+
+  const clamp = (arr: string[], i: number) => Math.max(0, Math.min(i, arr.length));
+
+  if (target.type === "root") {
+    const i = clamp(rootOrder, indexModel);
+    rootOrder = [...rootOrder.slice(0, i), layerId, ...rootOrder.slice(i)];
+  } else {
+    groups = groups.map((g) => {
+      if (g.id !== target.groupId) return g;
+      const kids = g.childIds.filter((id) => id !== layerId);
+      const i = clamp(kids, indexModel);
+      return { ...g, childIds: [...kids.slice(0, i), layerId, ...kids.slice(i)] };
+    });
+  }
+
+  return { ...p, layerTree: { ...tree, rootOrder, groups } };
+}
+
+/**
+ * Remove shape from all layers; if targetLayerId set, insert at model index;
+ * if null, leave ungrouped.
+ */
+export function moveShape(
+  project: ManualProject,
+  shapeId: string,
+  targetLayerId: string | null,
+  indexModel: number,
+): ManualProject {
+  if (!project.shapes.some((s) => s.id === shapeId)) return project;
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  if (targetLayerId && !layerById(tree, targetLayerId)) return project;
+
+  let layers = tree.layers.map((l) => ({
+    ...l,
+    shapeIds: l.shapeIds.filter((id) => id !== shapeId),
+  }));
+
+  if (targetLayerId) {
+    layers = layers.map((l) => {
+      if (l.id !== targetLayerId) return l;
+      const ids = l.shapeIds.filter((id) => id !== shapeId);
+      const i = Math.max(0, Math.min(indexModel, ids.length));
+      return { ...l, shapeIds: [...ids.slice(0, i), shapeId, ...ids.slice(i)] };
+    });
+  }
+
+  return { ...p, layerTree: { ...tree, layers } };
+}
+
+/**
+ * Reorder ungrouped shapes among themselves by rearranging `project.shapes`.
+ * `shapeIdsModel` is the desired order of currently-ungrouped shapes (back→front).
+ * Assigned shapes keep relative order; ungrouped slots follow the given list.
+ */
+export function reorderUngrouped(project: ManualProject, shapeIdsModel: string[]): ManualProject {
+  const ungrouped = new Set(ungroupedShapeIds(project));
+  const wanted = shapeIdsModel.filter((id) => ungrouped.has(id));
+  if (wanted.length === 0) return project;
+  let ui = 0;
+  const rebuilt = project.shapes.map((s) => {
+    if (!ungrouped.has(s.id)) return s;
+    const id = wanted[ui++];
+    return project.shapes.find((x) => x.id === id) ?? s;
+  });
+  return { ...project, shapes: rebuilt };
+}
+
+/** Set collapsed on every layer and group. */
+export function setAllCollapsed(project: ManualProject, collapsed: boolean): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  return {
+    ...p,
+    layerTree: {
+      ...tree,
+      layers: tree.layers.map((l) => ({ ...l, collapsed })),
+      groups: tree.groups.map((g) => ({ ...g, collapsed })),
+    },
+  };
 }
 
 export function getStroke(project: ManualProject | null | undefined): ManualStroke {

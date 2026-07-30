@@ -27,6 +27,8 @@ import {
   isManualWorkspace,
   loadWorkspace,
   makeTab,
+  moveLayer,
+  moveShape,
   newProject,
   newShapeId,
   newWorkspace,
@@ -34,15 +36,19 @@ import {
   patchLayer,
   removeShapeFromLayers,
   removeVert,
+  reorderUngrouped,
   saveWorkspace,
   seedFromGeometry,
   setActiveLayer,
+  setAllCollapsed,
+  setRootOrder,
   shapeVerts,
   shellVertsOf,
   suggestNextFloor,
   syncShapeFromVerts,
   ungroupedShapeIds,
   SHELL_ID,
+  type LayerMoveTarget,
   type ManualProject,
   type ManualShape,
   type ManualWorkspace,
@@ -454,14 +460,15 @@ export default function ManualPage() {
     updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }));
 
   // ---- layers ----
+  // Display order (front → back) for Shift+click range selection
   const panelRows = useMemo(() => {
     if (!project) return [] as string[];
     const tree = getLayerTree(project);
     const rows: string[] = [];
-    for (const id of tree.rootOrder) {
+    for (const id of [...tree.rootOrder].reverse()) {
       rows.push(id);
       const g = tree.groups.find((x) => x.id === id);
-      if (g && !g.collapsed) rows.push(...g.childIds);
+      if (g && !g.collapsed) rows.push(...[...g.childIds].reverse());
     }
     for (const l of tree.layers) {
       if (!tree.rootOrder.includes(l.id) && !tree.groups.some((g) => g.childIds.includes(l.id))) {
@@ -542,6 +549,47 @@ export default function ManualPage() {
     updateActive((p) => deleteLayerNodes(p, selectedLayerIds));
     setSelectedLayerIds([]);
   };
+
+  const onReorderRoot = useCallback(
+    (displayOrder: string[]) => {
+      updateActive((p) => setRootOrder(p, [...displayOrder].reverse()));
+    },
+    [updateActive],
+  );
+  const onMoveLayerCb = useCallback(
+    (layerId: string, target: LayerMoveTarget, indexModel: number) => {
+      updateActive((p) => moveLayer(p, layerId, target, indexModel));
+    },
+    [updateActive],
+  );
+  const onMoveShapeCb = useCallback(
+    (shapeId: string, targetLayerId: string | null, indexModel: number) => {
+      updateActive((p) => moveShape(p, shapeId, targetLayerId, indexModel));
+    },
+    [updateActive],
+  );
+  const onReorderUngroupedCb = useCallback(
+    (displayOrder: string[]) => {
+      updateActive((p) => reorderUngrouped(p, [...displayOrder].reverse()));
+    },
+    [updateActive],
+  );
+  const onToggleLayerCollapsed = useCallback(
+    (id: string) => {
+      updateActive((p) => {
+        const l = getLayerTree(p).layers.find((x) => x.id === id);
+        if (!l) return p;
+        return patchLayer(p, id, { collapsed: !l.collapsed });
+      });
+    },
+    [updateActive],
+  );
+  const onCollapseAll = useCallback(
+    (collapsed: boolean) => {
+      updateActive((p) => setAllCollapsed(p, collapsed));
+    },
+    [updateActive],
+  );
 
   // ---- export ----
   const doExportSvg = () => {
@@ -1112,6 +1160,7 @@ export default function ManualPage() {
                           const g = getLayerTree(project).groups.find((x) => x.id === id);
                           if (g) updateActive((p) => patchGroup(p, id, { collapsed: !g.collapsed }));
                         }}
+                        onToggleLayerCollapsed={onToggleLayerCollapsed}
                         onRenameLayer={(id) => {
                           const l = getLayerTree(project).layers.find((x) => x.id === id);
                           if (!l) return;
@@ -1128,6 +1177,11 @@ export default function ManualPage() {
                         onGroup={doGroup}
                         onDeleteNodes={doDeleteLayerNodes}
                         onSetActiveLayer={(id) => updateActive((p) => setActiveLayer(p, id))}
+                        onReorderRoot={onReorderRoot}
+                        onMoveLayer={onMoveLayerCb}
+                        onMoveShape={onMoveShapeCb}
+                        onReorderUngrouped={onReorderUngroupedCb}
+                        onCollapseAll={onCollapseAll}
                       />
                     </div>
                   </div>
