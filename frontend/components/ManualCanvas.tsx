@@ -685,7 +685,6 @@ export default function ManualCanvas({
           drag.current = null;
         }}
         onClick={onSvgClick}
-        onDoubleClick={() => drawingPolyLike && closePoly()}
       >
         <defs>
           {shellLive && (
