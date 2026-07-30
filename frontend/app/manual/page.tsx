@@ -18,8 +18,11 @@ import {
   loadProject,
   newProject,
   newShapeId,
+  removeVert,
   saveProject,
   seedFromGeometry,
+  shapeVerts,
+  shellVertsOf,
   syncShapeFromVerts,
   SHELL_ID,
   type ManualProject,
@@ -61,6 +64,7 @@ export default function ManualPage() {
   const [tool, setTool] = useState<Tool>("select");
   const [drawCat, setDrawCat] = useState<Category>("fnb");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedVertIndex, setSelectedVertIndex] = useState<number | null>(null);
   const [snap, setSnap] = useState(true);
   const [gridSize, setGridSize] = useState(8);
   const [busy, setBusy] = useState(false);
@@ -137,6 +141,7 @@ export default function ManualPage() {
   const addShape = useCallback((s: ManualShape) => {
     setProject((p) => (p ? { ...p, shapes: [...p.shapes, s] } : p));
     setSelectedId(s.id);
+    setSelectedVertIndex(null);
     setTool("select");
   }, []);
 
@@ -158,17 +163,48 @@ export default function ManualPage() {
     setProject((p) => (p ? { ...p, shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)) } : p));
   }, []);
 
+  const selectId = useCallback((id: string | null) => {
+    setSelectedId(id);
+    setSelectedVertIndex(null);
+  }, []);
+
+  const deleteVert = useCallback(() => {
+    if (!project || selectedId == null || selectedVertIndex == null) return;
+    const verts =
+      selectedId === SHELL_ID
+        ? shellVertsOf(project)
+        : (() => {
+            const s = project.shapes.find((x) => x.id === selectedId);
+            return s ? shapeVerts(s) : null;
+          })();
+    if (!verts) return;
+    const next = removeVert(verts, selectedVertIndex);
+    if (!next) {
+      window.alert("Need at least 3 points");
+      return;
+    }
+    if (selectedId === SHELL_ID) {
+      const points = syncShapeFromVerts(next).points;
+      setProject((p) => (p ? { ...p, shell: points, shellVerts: next } : p));
+    } else {
+      updateShapeVerts(selectedId, next);
+    }
+    setSelectedVertIndex(null);
+  }, [project, selectedId, selectedVertIndex, updateShapeVerts]);
+
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
     if (selectedId === SHELL_ID) {
       if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
       setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
       setSelectedId(null);
+      setSelectedVertIndex(null);
       return;
     }
     if (!confirm("Delete this shape?")) return;
     setProject((p) => (p ? { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) } : p));
     setSelectedId(null);
+    setSelectedVertIndex(null);
   }, [selectedId]);
 
   const setShell = useCallback((verts: PolyVert[]) => {
@@ -180,7 +216,10 @@ export default function ManualPage() {
   const clearShell = useCallback(() => {
     if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
     setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
-    if (selectedId === SHELL_ID) setSelectedId(null);
+    if (selectedId === SHELL_ID) {
+      setSelectedId(null);
+      setSelectedVertIndex(null);
+    }
   }, [selectedId]);
 
   const duplicateSelected = useCallback(() => {
@@ -200,6 +239,7 @@ export default function ManualPage() {
         })),
       };
       setSelectedId(copy.id);
+      setSelectedVertIndex(null);
       return { ...p, shapes: [...p.shapes, copy] };
     });
   }, [selectedId]);
@@ -237,6 +277,7 @@ export default function ManualPage() {
         if (p.version !== 1 || !Array.isArray(p.shapes)) throw new Error("not a manual project");
         setProject(p);
         setSelectedId(null);
+        setSelectedVertIndex(null);
       } catch (e) {
         setError("Invalid project file: " + String(e));
       }
@@ -247,6 +288,7 @@ export default function ManualPage() {
     if (!confirm("Start a new project? Current shapes stay saved only if you exported them.")) return;
     setProject(newProject(project?.floor ?? "1F"));
     setSelectedId(null);
+    setSelectedVertIndex(null);
     setFile(null);
   };
 
@@ -266,13 +308,16 @@ export default function ManualPage() {
       else if (e.key === "r" || e.key === "R") setTool("rect");
       else if (e.key === "p" || e.key === "P") setTool("poly");
       else if (e.key === "o" || e.key === "O") setTool("outline");
-      else if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
-      else if (e.key === "[") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) } } : p));
+      else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        if (selectedVertIndex != null) deleteVert();
+        else deleteSelected();
+      } else if (e.key === "[") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) } } : p));
       else if (e.key === "]") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) } } : p));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, duplicateSelected]);
+  }, [deleteSelected, deleteVert, duplicateSelected, selectedVertIndex]);
 
   const selShape = useMemo(
     () =>
@@ -416,7 +461,7 @@ export default function ManualPage() {
                 {shellPts && (
                   <button
                     onClick={() => {
-                      setSelectedId(SHELL_ID);
+                      selectId(SHELL_ID);
                       setTool("select");
                     }}
                     className={`rounded px-2 py-1 text-xs ${shellSelected ? "bg-brand text-white" : "bg-neutral-200"}`}
@@ -440,6 +485,14 @@ export default function ManualPage() {
               <p className="mb-2 text-xs text-neutral-600">
                 Outer floor-plate outline. Units outside this boundary are clipped.
               </p>
+              {selectedVertIndex != null && (
+                <button
+                  onClick={deleteVert}
+                  className="mb-2 w-full rounded bg-neutral-800 px-2 py-1 text-xs text-white"
+                >
+                  Delete point ⌫
+                </button>
+              )}
               <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
                 Delete shell ⌫
               </button>
@@ -481,6 +534,14 @@ export default function ManualPage() {
                   className="mt-1 w-full rounded border border-neutral-300 px-1 py-1 text-xs"
                 />
               </label>
+              {selectedVertIndex != null && (
+                <button
+                  onClick={deleteVert}
+                  className="mb-2 w-full rounded bg-neutral-800 px-2 py-1 text-xs text-white"
+                >
+                  Delete point ⌫
+                </button>
+              )}
               <div className="flex gap-2">
                 <button onClick={duplicateSelected} className="flex-1 rounded bg-neutral-200 px-2 py-1 text-xs">Duplicate ⌘D</button>
                 <button onClick={deleteSelected} className="flex-1 rounded bg-red-600 px-2 py-1 text-xs text-white">Delete ⌫</button>
@@ -533,7 +594,7 @@ export default function ManualPage() {
               {tool === "outline" &&
                 "Trace outer boundary · click/drag curves · Space = pan"}
               {tool === "select" &&
-                "Drag anchors/handles to edit curves · right-click edge = add point · Space = pan"}
+                "Alt-drag edge = curve · click point then ⌫ = delete point · right-click edge = add point"}
             </span>
           </div>
 
@@ -545,8 +606,10 @@ export default function ManualPage() {
                 snap={snap}
                 gridSize={gridSize}
                 selectedId={selectedId}
+                selectedVertIndex={selectedVertIndex}
                 makeShape={makeShape}
-                onSelect={setSelectedId}
+                onSelect={selectId}
+                onSelectVert={setSelectedVertIndex}
                 onAddShape={addShape}
                 onUpdateShapeVerts={updateShapeVerts}
                 onSetShell={setShell}

@@ -2,6 +2,8 @@
 import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from "react";
 import type { Point } from "@/lib/types";
 import {
+  bendEdge,
+  edgeHitRadius,
   flattenPolyVertsOpen,
   getStroke,
   insertVertOnEdge,
@@ -29,8 +31,10 @@ interface Props {
   snap: boolean;
   gridSize: number;
   selectedId: string | null;
+  selectedVertIndex: number | null;
   makeShape: (kind: ShapeKind, points: Point[], verts?: PolyVert[]) => ManualShape;
   onSelect: (id: string | null) => void;
+  onSelectVert: (index: number | null) => void;
   onAddShape: (shape: ManualShape) => void;
   onUpdateShapeVerts: (id: string, verts: PolyVert[]) => void;
   onSetShell: (verts: PolyVert[]) => void;
@@ -46,7 +50,7 @@ type PolyDraft = {
 };
 
 type DragState = {
-  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "rect" | "polyPlace";
+  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "bend" | "rect" | "polyPlace";
   startClient: { x: number; y: number };
   startContent: Point;
   origVerts: PolyVert[];
@@ -76,8 +80,10 @@ export default function ManualCanvas({
   snap,
   gridSize,
   selectedId,
+  selectedVertIndex,
   makeShape,
   onSelect,
+  onSelectVert,
   onAddShape,
   onUpdateShapeVerts,
   onSetShell,
@@ -104,6 +110,7 @@ export default function ManualCanvas({
   const moved = useRef(false);
   const spaceHeld = useRef(false);
   const shiftHeld = useRef(false);
+  const altHeld = useRef(false);
   const polyRef = useRef<PolyDraft | null>(null);
   useEffect(() => {
     polyRef.current = poly;
@@ -228,6 +235,35 @@ export default function ManualCanvas({
       moved.current = false;
     } else if (drawingPolyLike) {
       return;
+    } else if (tool === "select" && (e.altKey || altHeld.current)) {
+      // Alt-drag near any edge to bend (prefer selected)
+      const maxDist = edgeHitRadius(view.scale);
+      const tryBend = (id: string, verts: PolyVert[]) => {
+        const edge = nearestEdge(c, verts, maxDist);
+        if (!edge) return false;
+        onSelect(id);
+        onSelectVert(edge.index);
+        drag.current = {
+          mode: "bend",
+          startClient: { x: e.clientX, y: e.clientY },
+          startContent: c,
+          origVerts: cloneVerts(verts),
+          vIdx: edge.index,
+        };
+        moved.current = false;
+        setLiveEdit({ id, verts: bendEdge(verts, edge.index, c) });
+        return true;
+      };
+      if (selectedId === SHELL_ID && shellV && tryBend(SHELL_ID, shellV)) return;
+      if (selectedId && selectedId !== SHELL_ID) {
+        const s = shapes.find((x) => x.id === selectedId);
+        if (s && tryBend(s.id, shapeVerts(s))) return;
+      }
+      if (shellV && tryBend(SHELL_ID, shellV)) return;
+      for (const s of shapes) {
+        if (tryBend(s.id, shapeVerts(s))) return;
+      }
+      beginPan(e);
     } else {
       beginPan(e);
     }
@@ -308,6 +344,10 @@ export default function ManualCanvas({
       const verts = cloneVerts(dstate.origVerts);
       verts[dstate.vIdx] = { ...verts[dstate.vIdx], handleOut: h };
       setLiveEdit({ id: selectedId, verts });
+    } else if (dstate.mode === "bend" && selectedId && dstate.vIdx >= 0) {
+      let h = toContent(e.clientX, e.clientY);
+      h = snapPoint(h, selectedId);
+      setLiveEdit({ id: selectedId, verts: bendEdge(dstate.origVerts, dstate.vIdx, h) });
     }
   };
 
@@ -339,7 +379,12 @@ export default function ManualCanvas({
         const verts = corners.map((p) => ({ p }));
         onAddShape(makeShape("rect", corners, verts));
       }
-    } else if (dstate.mode === "move" || dstate.mode === "vertex" || dstate.mode === "bezier") {
+    } else if (
+      dstate.mode === "move" ||
+      dstate.mode === "vertex" ||
+      dstate.mode === "bezier" ||
+      dstate.mode === "bend"
+    ) {
       const committed = liveRef.current;
       if (committed) commitVerts(committed.id, committed.verts);
       setLiveEdit(null);
@@ -347,14 +392,17 @@ export default function ManualCanvas({
   };
 
   const onSvgClick = () => {
-    if (tool === "select" && !moved.current) onSelect(null);
+    if (tool === "select" && !moved.current) {
+      onSelect(null);
+      onSelectVert(null);
+    }
   };
 
   const onContextMenu = (e: MouseEvent) => {
     e.preventDefault();
     if (tool !== "select" || spaceHeld.current) return;
     const c = toContent(e.clientX, e.clientY);
-    const maxDist = 12 / view.scale;
+    const maxDist = edgeHitRadius(view.scale);
 
     // prefer selected shape/shell, then any shape
     const candidates: { id: string; verts: PolyVert[] }[] = [];
@@ -383,6 +431,7 @@ export default function ManualCanvas({
     const next = insertVertOnEdge(src, hit.edgeIndex, hit.q);
     commitVerts(hit.id, next);
     onSelect(hit.id);
+    onSelectVert(hit.edgeIndex + 1);
   };
 
   const closePoly = useCallback(() => {
@@ -412,11 +461,16 @@ export default function ManualCanvas({
         e.preventDefault();
       }
       if (e.key === "Shift") shiftHeld.current = true;
+      if (e.key === "Alt") {
+        altHeld.current = true;
+        e.preventDefault();
+      }
       if (e.key === "Enter" && drawingPolyLike) closePoly();
       if (e.key === "Escape") {
         polyRef.current = null;
         setPoly(null);
         setPlacing(null);
+        onSelectVert(null);
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !e.shiftKey && drawingPolyLike) {
         const prev = polyRef.current;
@@ -436,6 +490,7 @@ export default function ManualCanvas({
     const ku = (e: KeyboardEvent) => {
       if (e.code === "Space") spaceHeld.current = false;
       if (e.key === "Shift") shiftHeld.current = false;
+      if (e.key === "Alt") altHeld.current = false;
     };
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);
@@ -443,13 +498,14 @@ export default function ManualCanvas({
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
     };
-  }, [drawingPolyLike, closePoly]);
+  }, [drawingPolyLike, closePoly, onSelectVert]);
 
   const resetView = () => setView({ scale: 1, tx: 0, ty: 0 });
 
   const beginVertexDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
     e.stopPropagation();
     onSelect(id);
+    onSelectVert(i);
     drag.current = {
       mode: "vertex",
       startClient: { x: e.clientX, y: e.clientY },
@@ -463,6 +519,7 @@ export default function ManualCanvas({
   const beginBezierDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
     e.stopPropagation();
     onSelect(id);
+    onSelectVert(i);
     drag.current = {
       mode: "bezier",
       startClient: { x: e.clientX, y: e.clientY },
@@ -476,7 +533,29 @@ export default function ManualCanvas({
   const beginMove = (e: MouseEvent, verts: PolyVert[], id: string) => {
     if (tool !== "select" || spaceHeld.current || e.button !== 0) return;
     e.stopPropagation();
+
+    // Alt + drag on fill/edge → bend nearest edge instead of moving whole shape
+    if (e.altKey || altHeld.current) {
+      const c = toContent(e.clientX, e.clientY);
+      const edge = nearestEdge(c, verts, edgeHitRadius(view.scale));
+      if (edge) {
+        onSelect(id);
+        onSelectVert(edge.index);
+        drag.current = {
+          mode: "bend",
+          startClient: { x: e.clientX, y: e.clientY },
+          startContent: c,
+          origVerts: cloneVerts(verts),
+          vIdx: edge.index,
+        };
+        moved.current = false;
+        setLiveEdit({ id, verts: bendEdge(verts, edge.index, c) });
+        return;
+      }
+    }
+
     onSelect(id);
+    onSelectVert(null);
     drag.current = {
       mode: "move",
       startClient: { x: e.clientX, y: e.clientY },
@@ -633,6 +712,7 @@ export default function ManualCanvas({
               strokeLinecap="round"
               className={tool === "select" ? "cursor-move" : ""}
               pointerEvents={tool === "select" ? "stroke" : "none"}
+              onClick={(e) => e.stopPropagation()}
               onMouseDown={(e) => beginMove(e, shellLive, SHELL_ID)}
             />
           )}
@@ -690,8 +770,8 @@ export default function ManualCanvas({
                 <circle
                   cx={v.p[0]}
                   cy={v.p[1]}
-                  r={handleR}
-                  fill="#FFFFFF"
+                  r={selectedVertIndex === i ? handleR * 1.35 : handleR}
+                  fill={selectedVertIndex === i ? BRAND : "#FFFFFF"}
                   stroke={BRAND}
                   strokeWidth={uiSw}
                   className="cursor-pointer"

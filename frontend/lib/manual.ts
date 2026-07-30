@@ -179,6 +179,32 @@ export function insertVertOnEdge(verts: PolyVert[], edgeIndex: number, q: Point)
   return next;
 }
 
+/** Set/replace outgoing handle on the start vertex of an edge (bend that segment). */
+export function bendEdge(verts: PolyVert[], edgeIndex: number, handlePoint: Point): PolyVert[] {
+  const next: PolyVert[] = verts.map((v) => ({
+    p: [v.p[0], v.p[1]] as Point,
+    ...(v.handleOut ? { handleOut: [v.handleOut[0], v.handleOut[1]] as Point } : {}),
+  }));
+  const i = ((edgeIndex % next.length) + next.length) % next.length;
+  next[i] = { p: next[i].p, handleOut: [handlePoint[0], handlePoint[1]] as Point };
+  return next;
+}
+
+/** Remove a vertex; returns null if it would leave fewer than 3 points. */
+export function removeVert(verts: PolyVert[], index: number): PolyVert[] | null {
+  if (verts.length <= 3) return null;
+  if (index < 0 || index >= verts.length) return null;
+  return verts.filter((_, i) => i !== index).map((v) => ({
+    p: [v.p[0], v.p[1]] as Point,
+    ...(v.handleOut ? { handleOut: [v.handleOut[0], v.handleOut[1]] as Point } : {}),
+  }));
+}
+
+/** Content-space edge hit radius from zoom (screen ~28px, floor 8 content units). */
+export function edgeHitRadius(viewScale: number): number {
+  return Math.max(8, 28 / Math.max(0.05, viewScale));
+}
+
 /** Draft helpers below — cubic sampling for sync/export. */
 
 function lerpPt(a: Point, b: Point, t: number): Point {
