@@ -914,6 +914,7 @@ export function newProject(floor: string): ManualProject {
     shellVerts: null,
     stroke: { ...DEFAULT_STROKE },
     drawOpacity: DEFAULT_DRAW_OPACITY,
+    layerTree: emptyLayerTree(),
     updatedAt: Date.now(),
   };
 }
@@ -922,7 +923,8 @@ export function makeTab(project: ManualProject, title?: string): ManualTab {
   return {
     id: newTabId(),
     title: title || project.floor || "1F",
-    project: { ...project, updatedAt: Date.now() },
+    // Deep-clone so tabs never share layerTree / shapes refs
+    project: structuredClone({ ...project, updatedAt: Date.now() }),
   };
 }
 

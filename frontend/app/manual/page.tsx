@@ -133,6 +133,10 @@ export default function ManualPage() {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const project = useMemo(() => activeProject(workspace), [workspace]);
+  const activeTabTitle = useMemo(() => {
+    if (!workspace) return "";
+    return workspace.tabs.find((t) => t.id === workspace.activeTabId)?.title ?? "";
+  }, [workspace]);
 
   const updateActive = useCallback((fn: (p: ManualProject) => ManualProject) => {
     setWorkspace((ws) => {
@@ -173,8 +177,7 @@ export default function ManualPage() {
     };
   }, [workspace]);
 
-  const switchTab = useCallback((id: string) => {
-    setWorkspace((ws) => (ws ? { ...ws, activeTabId: id } : ws));
+  const resetTabLocalUi = useCallback(() => {
     setSelectedId(null);
     setSelectedVertIndex(null);
     setSelectedLayerIds([]);
@@ -182,6 +185,14 @@ export default function ManualPage() {
     setFile(null);
     setTool("select");
   }, []);
+
+  const switchTab = useCallback(
+    (id: string) => {
+      setWorkspace((ws) => (ws ? { ...ws, activeTabId: id } : ws));
+      resetTabLocalUi();
+    },
+    [resetTabLocalUi],
+  );
 
   const addTab = useCallback(() => {
     setWorkspace((ws) => {
@@ -194,35 +205,33 @@ export default function ManualPage() {
         activeTabId: tab.id,
       };
     });
-    setSelectedId(null);
-    setSelectedVertIndex(null);
-    setFile(null);
-    setTool("select");
-  }, []);
+    resetTabLocalUi();
+  }, [resetTabLocalUi]);
 
-  const closeTab = useCallback((id: string) => {
-    setWorkspace((ws) => {
-      if (!ws) return ws;
-      const tab = ws.tabs.find((t) => t.id === id);
-      if (!tab) return ws;
-      if (tab.project.shapes.length > 0 || tab.project.shell) {
-        if (!confirm(`Close tab “${tab.title}”? Unsaved export will be lost from this tab.`)) return ws;
-      }
-      if (ws.tabs.length <= 1) {
-        const fresh = makeTab(newProject(tab.project.floor || "1F"));
-        return { ...ws, tabs: [fresh], activeTabId: fresh.id };
-      }
-      const tabs = ws.tabs.filter((t) => t.id !== id);
-      const activeTabId =
-        ws.activeTabId === id
-          ? tabs[Math.max(0, ws.tabs.findIndex((t) => t.id === id) - 1)]?.id ?? tabs[0].id
-          : ws.activeTabId;
-      return { ...ws, tabs, activeTabId };
-    });
-    setSelectedId(null);
-    setSelectedVertIndex(null);
-    setFile(null);
-  }, []);
+  const closeTab = useCallback(
+    (id: string) => {
+      setWorkspace((ws) => {
+        if (!ws) return ws;
+        const tab = ws.tabs.find((t) => t.id === id);
+        if (!tab) return ws;
+        if (tab.project.shapes.length > 0 || tab.project.shell) {
+          if (!confirm(`Close tab “${tab.title}”? Unsaved export will be lost from this tab.`)) return ws;
+        }
+        if (ws.tabs.length <= 1) {
+          const fresh = makeTab(newProject(tab.project.floor || "1F"));
+          return { ...ws, tabs: [fresh], activeTabId: fresh.id };
+        }
+        const tabs = ws.tabs.filter((t) => t.id !== id);
+        const activeTabId =
+          ws.activeTabId === id
+            ? tabs[Math.max(0, ws.tabs.findIndex((t) => t.id === id) - 1)]?.id ?? tabs[0].id
+            : ws.activeTabId;
+        return { ...ws, tabs, activeTabId };
+      });
+      resetTabLocalUi();
+    },
+    [resetTabLocalUi],
+  );
 
   const renameTab = useCallback((id: string) => {
     setWorkspace((ws) => {
@@ -1045,20 +1054,23 @@ export default function ManualPage() {
             )}
 
             {project && (
-              <div className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-1">
+              <div
+                key={workspace?.activeTabId ?? "layers"}
+                className="absolute bottom-3 right-3 z-20 flex flex-col items-end gap-1"
+              >
                 {!layersOpen ? (
                   <button
                     type="button"
                     onClick={() => setLayersOpen(true)}
                     className="rounded-lg bg-white/95 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-neutral-600 shadow-lg ring-1 ring-neutral-200 hover:bg-white"
                   >
-                    Layers
+                    Layers{activeTabTitle ? ` · ${activeTabTitle}` : ""}
                   </button>
                 ) : (
                   <div className="w-72 overflow-hidden rounded-lg bg-white/95 shadow-xl ring-1 ring-neutral-200 backdrop-blur-sm">
                     <div className="flex items-center justify-between border-b border-neutral-200 bg-neutral-50 px-3 py-1.5">
-                      <span className="text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
-                        Layers
+                      <span className="truncate text-[11px] font-semibold uppercase tracking-wide text-neutral-500">
+                        Layers{activeTabTitle ? ` · ${activeTabTitle}` : ""}
                       </span>
                       <button
                         type="button"
