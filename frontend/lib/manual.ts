@@ -460,9 +460,29 @@ export function shellFromGeometry(geo: Geometry): Point[] | null {
   return ring.map(([x, y]) => [(x - t.pad) / t.scale + t.x0, (y - t.pad) / t.scale + t.y0] as Point);
 }
 
-// ---- localStorage store (single active project) ----
+// ---- localStorage store (multi-tab workspace) ----
 
-const KEY = "petakin.manual.v1";
+const KEY_V1 = "petakin.manual.v1";
+const KEY_WS = "petakin.manual.workspace.v2";
+
+export interface ManualTab {
+  id: string;
+  title: string;
+  project: ManualProject;
+}
+
+export interface ManualWorkspace {
+  version: 2;
+  tabs: ManualTab[];
+  activeTabId: string;
+  updatedAt: number;
+}
+
+let tabIdCounter = 0;
+export function newTabId(): string {
+  tabIdCounter += 1;
+  return `t${Date.now().toString(36)}${tabIdCounter}`;
+}
 
 export function newProject(floor: string): ManualProject {
   return {
@@ -478,27 +498,105 @@ export function newProject(floor: string): ManualProject {
   };
 }
 
-export function loadProject(): ManualProject | null {
+export function makeTab(project: ManualProject, title?: string): ManualTab {
+  return {
+    id: newTabId(),
+    title: title || project.floor || "1F",
+    project: { ...project, updatedAt: Date.now() },
+  };
+}
+
+export function newWorkspace(floor = "1F"): ManualWorkspace {
+  const tab = makeTab(newProject(floor));
+  return {
+    version: 2,
+    tabs: [tab],
+    activeTabId: tab.id,
+    updatedAt: Date.now(),
+  };
+}
+
+export function workspaceFromProject(project: ManualProject): ManualWorkspace {
+  const tab = makeTab(project);
+  return {
+    version: 2,
+    tabs: [tab],
+    activeTabId: tab.id,
+    updatedAt: Date.now(),
+  };
+}
+
+export function activeProject(ws: ManualWorkspace | null): ManualProject | null {
+  if (!ws?.tabs.length) return null;
+  return ws.tabs.find((t) => t.id === ws.activeTabId)?.project ?? ws.tabs[0].project;
+}
+
+export function suggestNextFloor(ws: ManualWorkspace): string {
+  const used = new Set(ws.tabs.map((t) => t.project.floor));
+  for (let i = 1; i <= 20; i++) {
+    const f = `${i}F`;
+    if (!used.has(f)) return f;
+  }
+  return `F${ws.tabs.length + 1}`;
+}
+
+function dropBgData(project: ManualProject): ManualProject {
+  return { ...project, bg: { ...project.bg, dataUrl: "" } };
+}
+
+function workspaceWithLiteBgs(ws: ManualWorkspace): ManualWorkspace {
+  return {
+    ...ws,
+    tabs: ws.tabs.map((t) => ({ ...t, project: dropBgData(t.project) })),
+  };
+}
+
+export function loadWorkspace(): ManualWorkspace | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = localStorage.getItem(KEY);
+    const raw = localStorage.getItem(KEY_WS);
+    if (raw) {
+      const ws = JSON.parse(raw) as ManualWorkspace;
+      if (ws.version === 2 && Array.isArray(ws.tabs) && ws.tabs.length > 0) {
+        if (!ws.tabs.some((t) => t.id === ws.activeTabId)) {
+          ws.activeTabId = ws.tabs[0].id;
+        }
+        return ws;
+      }
+    }
+  } catch {
+    /* fall through to v1 migrate */
+  }
+  try {
+    const raw = localStorage.getItem(KEY_V1);
     if (!raw) return null;
-    return JSON.parse(raw) as ManualProject;
+    const p = JSON.parse(raw) as ManualProject;
+    if (p.version !== 1 || !Array.isArray(p.shapes)) return null;
+    const ws = workspaceFromProject(p);
+    // Persist migration; keep v1 as backup until next successful ws save
+    try {
+      localStorage.setItem(KEY_WS, JSON.stringify(ws));
+    } catch {
+      /* ignore */
+    }
+    return ws;
   } catch {
     return null;
   }
 }
 
-export function saveProject(project: ManualProject): { ok: boolean; bgDropped: boolean } {
+export function saveWorkspace(workspace: ManualWorkspace): { ok: boolean; bgDropped: boolean } {
   if (typeof window === "undefined") return { ok: false, bgDropped: false };
-  const withTs = { ...project, updatedAt: Date.now() };
+  const withTs: ManualWorkspace = { ...workspace, version: 2, updatedAt: Date.now() };
   try {
-    localStorage.setItem(KEY, JSON.stringify(withTs));
+    localStorage.setItem(KEY_WS, JSON.stringify(withTs));
+    localStorage.removeItem(KEY_V1);
     return { ok: true, bgDropped: false };
   } catch {
     try {
-      const lite = { ...withTs, bg: { ...withTs.bg, dataUrl: "" } };
-      localStorage.setItem(KEY, JSON.stringify(lite));
+      const lite = workspaceWithLiteBgs(withTs);
+      localStorage.setItem(KEY_WS, JSON.stringify(lite));
+      localStorage.removeItem(KEY_V1);
       return { ok: true, bgDropped: true };
     } catch {
       return { ok: false, bgDropped: false };
@@ -506,6 +604,30 @@ export function saveProject(project: ManualProject): { ok: boolean; bgDropped: b
   }
 }
 
+/** @deprecated use loadWorkspace — kept for any external callers */
+export function loadProject(): ManualProject | null {
+  return activeProject(loadWorkspace());
+}
+
+/** @deprecated use saveWorkspace */
+export function saveProject(project: ManualProject): { ok: boolean; bgDropped: boolean } {
+  return saveWorkspace(workspaceFromProject(project));
+}
+
 export function clearProject(): void {
-  if (typeof window !== "undefined") localStorage.removeItem(KEY);
+  if (typeof window === "undefined") return;
+  localStorage.removeItem(KEY_V1);
+  localStorage.removeItem(KEY_WS);
+}
+
+export function isManualWorkspace(data: unknown): data is ManualWorkspace {
+  if (!data || typeof data !== "object") return false;
+  const w = data as ManualWorkspace;
+  return w.version === 2 && Array.isArray(w.tabs) && w.tabs.length > 0 && typeof w.activeTabId === "string";
+}
+
+export function isManualProject(data: unknown): data is ManualProject {
+  if (!data || typeof data !== "object") return false;
+  const p = data as ManualProject;
+  return p.version === 1 && Array.isArray(p.shapes);
 }

@@ -12,22 +12,29 @@ import {
   CATEGORY_COLORS,
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
+  activeProject,
   defaultFill,
   emitManualSvg,
   getDrawOpacity,
   getStroke,
-  loadProject,
+  isManualProject,
+  isManualWorkspace,
+  loadWorkspace,
+  makeTab,
   newProject,
   newShapeId,
+  newWorkspace,
   removeVert,
-  saveProject,
+  saveWorkspace,
   seedFromGeometry,
   shapeVerts,
   shellVertsOf,
+  suggestNextFloor,
   syncShapeFromVerts,
   SHELL_ID,
   type ManualProject,
   type ManualShape,
+  type ManualWorkspace,
   type PolyVert,
   type ShapeKind,
 } from "@/lib/manual";
@@ -60,7 +67,7 @@ function readImage(file: File): Promise<{ dataUrl: string; width: number; height
 }
 
 export default function ManualPage() {
-  const [project, setProject] = useState<ManualProject | null>(null);
+  const [workspace, setWorkspace] = useState<ManualWorkspace | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [tool, setTool] = useState<Tool>("select");
   const [drawCat, setDrawCat] = useState<Category>("fnb");
@@ -74,37 +81,143 @@ export default function ManualPage() {
   const importRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // restore last project on mount
-  useEffect(() => {
-    const p = loadProject();
-    if (p) setProject(p);
+  const project = useMemo(() => activeProject(workspace), [workspace]);
+
+  const updateActive = useCallback((fn: (p: ManualProject) => ManualProject) => {
+    setWorkspace((ws) => {
+      if (!ws) return ws;
+      return {
+        ...ws,
+        tabs: ws.tabs.map((t) => {
+          if (t.id !== ws.activeTabId) return t;
+          const next = fn(t.project);
+          const title =
+            t.title === t.project.floor || t.title === next.floor ? next.floor : t.title;
+          return { ...t, project: next, title };
+        }),
+      };
+    });
   }, []);
 
-  // debounced autosave on any project change
+  // restore workspace on mount (or start with one empty tab)
   useEffect(() => {
-    if (!project) return;
+    const ws = loadWorkspace();
+    setWorkspace(ws ?? newWorkspace("1F"));
+  }, []);
+
+  // debounced autosave
+  useEffect(() => {
+    if (!workspace) return;
     setSaved("saving");
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      const res = saveProject(project);
+      const res = saveWorkspace(workspace);
       setSaved(res.ok ? "saved" : "idle");
-      if (res.bgDropped) setError("Autosaved without background image (too large for browser storage). Re-upload it after refresh.");
+      if (res.bgDropped) {
+        setError("Autosaved without background image(s) (too large for browser storage). Re-upload after refresh.");
+      }
     }, 500);
     return () => {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
-  }, [project]);
+  }, [workspace]);
 
-  const setFloor = (floor: string) => setProject((p) => (p ? { ...p, floor } : newProject(floor)));
+  const switchTab = useCallback((id: string) => {
+    setWorkspace((ws) => (ws ? { ...ws, activeTabId: id } : ws));
+    setSelectedId(null);
+    setSelectedVertIndex(null);
+    setFile(null);
+    setTool("select");
+  }, []);
+
+  const addTab = useCallback(() => {
+    setWorkspace((ws) => {
+      const base = ws ?? newWorkspace("1F");
+      const floor = suggestNextFloor(base);
+      const tab = makeTab(newProject(floor));
+      return {
+        ...base,
+        tabs: [...base.tabs, tab],
+        activeTabId: tab.id,
+      };
+    });
+    setSelectedId(null);
+    setSelectedVertIndex(null);
+    setFile(null);
+    setTool("select");
+  }, []);
+
+  const closeTab = useCallback((id: string) => {
+    setWorkspace((ws) => {
+      if (!ws) return ws;
+      const tab = ws.tabs.find((t) => t.id === id);
+      if (!tab) return ws;
+      if (tab.project.shapes.length > 0 || tab.project.shell) {
+        if (!confirm(`Close tab “${tab.title}”? Unsaved export will be lost from this tab.`)) return ws;
+      }
+      if (ws.tabs.length <= 1) {
+        const fresh = makeTab(newProject(tab.project.floor || "1F"));
+        return { ...ws, tabs: [fresh], activeTabId: fresh.id };
+      }
+      const tabs = ws.tabs.filter((t) => t.id !== id);
+      const activeTabId =
+        ws.activeTabId === id
+          ? tabs[Math.max(0, ws.tabs.findIndex((t) => t.id === id) - 1)]?.id ?? tabs[0].id
+          : ws.activeTabId;
+      return { ...ws, tabs, activeTabId };
+    });
+    setSelectedId(null);
+    setSelectedVertIndex(null);
+    setFile(null);
+  }, []);
+
+  const renameTab = useCallback((id: string) => {
+    setWorkspace((ws) => {
+      if (!ws) return ws;
+      const tab = ws.tabs.find((t) => t.id === id);
+      if (!tab) return ws;
+      const next = window.prompt("Tab name", tab.title);
+      if (next == null || !next.trim()) return ws;
+      return {
+        ...ws,
+        tabs: ws.tabs.map((t) => (t.id === id ? { ...t, title: next.trim() } : t)),
+      };
+    });
+  }, []);
+
+  const setFloor = (floor: string) => {
+    if (!workspace) {
+      setWorkspace(newWorkspace(floor));
+      return;
+    }
+    updateActive((p) => ({ ...p, floor }));
+  };
 
   const onFile = useCallback(async (f: File) => {
     setFile(f);
     setError(null);
     try {
       const bg = await readImage(f);
-      setProject((p) => {
-        const base = p ?? newProject("1F");
-        return { ...base, bg: { ...bg, opacity: base.bg.opacity || 0.4 } };
+      setWorkspace((ws) => {
+        if (!ws) {
+          const p = { ...newProject("1F"), bg: { ...bg, opacity: 0.4 } };
+          const tab = makeTab(p);
+          return { version: 2, tabs: [tab], activeTabId: tab.id, updatedAt: Date.now() };
+        }
+        return {
+          ...ws,
+          tabs: ws.tabs.map((t) =>
+            t.id === ws.activeTabId
+              ? {
+                  ...t,
+                  project: {
+                    ...t.project,
+                    bg: { ...bg, opacity: t.project.bg.opacity || 0.4 },
+                  },
+                }
+              : t,
+          ),
+        };
       });
     } catch (e) {
       setError(String(e));
@@ -118,13 +231,13 @@ export default function ManualPage() {
     try {
       const geo = await processImage(file, AEON_CONFIG);
       const shapes = seedFromGeometry(geo);
-      setProject((p) => (p ? { ...p, shapes: [...p.shapes, ...shapes] } : p));
+      updateActive((p) => ({ ...p, shapes: [...p.shapes, ...shapes] }));
     } catch (e) {
       setError("Seed failed (is the backend running?): " + String(e));
     } finally {
       setBusy(false);
     }
-  }, [file]);
+  }, [file, updateActive]);
 
   // ---- shape ops ----
   const makeShape = useCallback(
@@ -139,30 +252,38 @@ export default function ManualPage() {
     [drawCat],
   );
 
-  const addShape = useCallback((s: ManualShape) => {
-    setProject((p) => (p ? { ...p, shapes: [...p.shapes, s] } : p));
-    setSelectedId(s.id);
-    setSelectedVertIndex(null);
-    setTool("select");
-  }, []);
+  const addShape = useCallback(
+    (s: ManualShape) => {
+      updateActive((p) => ({ ...p, shapes: [...p.shapes, s] }));
+      setSelectedId(s.id);
+      setSelectedVertIndex(null);
+      setTool("select");
+    },
+    [updateActive],
+  );
 
-  const updateShapeVerts = useCallback((id: string, verts: PolyVert[]) => {
-    const synced = syncShapeFromVerts(verts);
-    setProject((p) =>
-      p
-        ? {
-            ...p,
-            shapes: p.shapes.map((s) =>
-              s.id === id ? { ...s, verts: synced.verts, points: synced.points } : s,
-            ),
-          }
-        : p,
-    );
-  }, []);
+  const updateShapeVerts = useCallback(
+    (id: string, verts: PolyVert[]) => {
+      const synced = syncShapeFromVerts(verts);
+      updateActive((p) => ({
+        ...p,
+        shapes: p.shapes.map((s) =>
+          s.id === id ? { ...s, verts: synced.verts, points: synced.points } : s,
+        ),
+      }));
+    },
+    [updateActive],
+  );
 
-  const patchShape = useCallback((id: string, patch: Partial<ManualShape>) => {
-    setProject((p) => (p ? { ...p, shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)) } : p));
-  }, []);
+  const patchShape = useCallback(
+    (id: string, patch: Partial<ManualShape>) => {
+      updateActive((p) => ({
+        ...p,
+        shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+      }));
+    },
+    [updateActive],
+  );
 
   const selectId = useCallback((id: string | null) => {
     setSelectedId(id);
@@ -186,47 +307,49 @@ export default function ManualPage() {
     }
     if (selectedId === SHELL_ID) {
       const points = syncShapeFromVerts(next).points;
-      setProject((p) => (p ? { ...p, shell: points, shellVerts: next } : p));
+      updateActive((p) => ({ ...p, shell: points, shellVerts: next }));
     } else {
       updateShapeVerts(selectedId, next);
     }
     setSelectedVertIndex(null);
-  }, [project, selectedId, selectedVertIndex, updateShapeVerts]);
+  }, [project, selectedId, selectedVertIndex, updateActive, updateShapeVerts]);
 
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
     if (selectedId === SHELL_ID) {
       if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
-      setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
+      updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
       setSelectedId(null);
       setSelectedVertIndex(null);
       return;
     }
     if (!confirm("Delete this shape?")) return;
-    setProject((p) => (p ? { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) } : p));
+    updateActive((p) => ({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }));
     setSelectedId(null);
     setSelectedVertIndex(null);
-  }, [selectedId]);
+  }, [selectedId, updateActive]);
 
-  const setShell = useCallback((verts: PolyVert[]) => {
-    const points = syncShapeFromVerts(verts).points;
-    setProject((p) => (p ? { ...p, shell: points, shellVerts: verts } : p));
-    setTool("select");
-  }, []);
+  const setShell = useCallback(
+    (verts: PolyVert[]) => {
+      const points = syncShapeFromVerts(verts).points;
+      updateActive((p) => ({ ...p, shell: points, shellVerts: verts }));
+      setTool("select");
+    },
+    [updateActive],
+  );
 
   const clearShell = useCallback(() => {
     if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
-    setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
+    updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
     if (selectedId === SHELL_ID) {
       setSelectedId(null);
       setSelectedVertIndex(null);
     }
-  }, [selectedId]);
+  }, [selectedId, updateActive]);
 
   const duplicateSelected = useCallback(() => {
     if (!selectedId || selectedId === SHELL_ID) return;
-    setProject((p) => {
-      if (!p) return p;
+    updateActive((p) => {
       const src = p.shapes.find((s) => s.id === selectedId);
       if (!src) return p;
       const shift = (pt: Point): Point => [pt[0] + 16, pt[1] + 16];
@@ -243,15 +366,15 @@ export default function ManualPage() {
       setSelectedVertIndex(null);
       return { ...p, shapes: [...p.shapes, copy] };
     });
-  }, [selectedId]);
+  }, [selectedId, updateActive]);
 
-  const setOpacity = (v: number) => setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: v } } : p));
-  const setDrawOpacity = (v: number) => setProject((p) => (p ? { ...p, drawOpacity: v } : p));
+  const setOpacity = (v: number) => updateActive((p) => ({ ...p, bg: { ...p.bg, opacity: v } }));
+  const setDrawOpacity = (v: number) => updateActive((p) => ({ ...p, drawOpacity: v }));
   const stroke = getStroke(project);
   const setStrokeColor = (color: string) =>
-    setProject((p) => (p ? { ...p, stroke: { ...getStroke(p), color } } : p));
+    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), color } }));
   const setStrokeWidth = (width: number) =>
-    setProject((p) => (p ? { ...p, stroke: { ...getStroke(p), width } } : p));
+    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }));
 
   // ---- export ----
   const doExportSvg = () => {
@@ -266,29 +389,72 @@ export default function ManualPage() {
     download(`petakin_${project.floor}.png`, blob);
   };
 
-  // ---- project file ----
+  // ---- project / workspace file ----
   const exportProject = () => {
     if (!project) return;
     download(`petakin_manual_${project.floor}.json`, JSON.stringify(project, null, 2), "application/json");
   };
-  const importProject = (f: File) => {
+  const exportAllTabs = () => {
+    if (!workspace) return;
+    download("petakin_manual_workspace.json", JSON.stringify(workspace, null, 2), "application/json");
+  };
+
+  const importJson = (f: File) => {
     const reader = new FileReader();
     reader.onload = () => {
       try {
-        const p = JSON.parse(String(reader.result)) as ManualProject;
-        if (p.version !== 1 || !Array.isArray(p.shapes)) throw new Error("not a manual project");
-        setProject(p);
-        setSelectedId(null);
-        setSelectedVertIndex(null);
+        const data = JSON.parse(String(reader.result));
+        if (isManualWorkspace(data)) {
+          if (
+            !confirm(
+              `Import ${data.tabs.length} tab(s) and add them to the current workspace?`,
+            )
+          ) {
+            return;
+          }
+          setWorkspace((ws) => {
+            const base = ws ?? newWorkspace("1F");
+            const imported = data.tabs.map((t) =>
+              makeTab(t.project, t.title || t.project.floor),
+            );
+            const tabs = [...base.tabs, ...imported];
+            return {
+              ...base,
+              tabs,
+              activeTabId: imported[imported.length - 1]?.id ?? base.activeTabId,
+            };
+          });
+          setSelectedId(null);
+          setSelectedVertIndex(null);
+          setFile(null);
+          return;
+        }
+        if (isManualProject(data)) {
+          setWorkspace((ws) => {
+            const base = ws ?? newWorkspace(data.floor || "1F");
+            const tab = makeTab(data);
+            return {
+              ...base,
+              tabs: [...base.tabs, tab],
+              activeTabId: tab.id,
+            };
+          });
+          setSelectedId(null);
+          setSelectedVertIndex(null);
+          setFile(null);
+          return;
+        }
+        throw new Error("not a manual project or workspace");
       } catch (e) {
-        setError("Invalid project file: " + String(e));
+        setError("Invalid file: " + String(e));
       }
     };
     reader.readAsText(f);
   };
+
   const doNew = () => {
-    if (!confirm("Start a new project? Current shapes stay saved only if you exported them.")) return;
-    setProject(newProject(project?.floor ?? "1F"));
+    if (!confirm("Reset the active tab to a blank project? Other tabs are kept.")) return;
+    updateActive(() => newProject(project?.floor ?? "1F"));
     setSelectedId(null);
     setSelectedVertIndex(null);
     setFile(null);
@@ -314,12 +480,21 @@ export default function ManualPage() {
         e.preventDefault();
         if (selectedVertIndex != null) deleteVert();
         else deleteSelected();
-      } else if (e.key === "[") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) } } : p));
-      else if (e.key === "]") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) } } : p));
+      } else if (e.key === "[") {
+        updateActive((p) => ({
+          ...p,
+          bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) },
+        }));
+      } else if (e.key === "]") {
+        updateActive((p) => ({
+          ...p,
+          bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) },
+        }));
+      }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, deleteVert, duplicateSelected, selectedVertIndex]);
+  }, [deleteSelected, deleteVert, duplicateSelected, selectedVertIndex, updateActive]);
 
   const selShape = useMemo(
     () =>
@@ -553,12 +728,27 @@ export default function ManualPage() {
 
           <Section title="Project">
             <div className="flex flex-wrap gap-2">
-              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New</button>
-              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">Export .json</button>
-              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">Import .json</button>
-              <input ref={importRef} type="file" accept="application/json" className="hidden"
-                onChange={(e) => e.target.files?.[0] && importProject(e.target.files[0])} />
+              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New tab content</button>
+              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export tab
+              </button>
+              <button onClick={exportAllTabs} disabled={!workspace} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export all tabs
+              </button>
+              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import
+              </button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
+              />
             </div>
+            <p className="mt-2 text-[11px] text-neutral-400">
+              Import accepts a single floor JSON or a full workspace (adds as new tabs).
+            </p>
           </Section>
 
           <Section title="Export">
@@ -568,12 +758,58 @@ export default function ManualPage() {
               <button onClick={doExportPng} disabled={!project || !project.shapes.length}
                 className="flex-1 rounded bg-brand-hover px-2 py-1.5 text-sm text-white disabled:opacity-40">Export PNG</button>
             </div>
-            <div className="mt-2 text-xs text-neutral-400">{project?.shapes.length ?? 0} shapes</div>
+            <div className="mt-2 text-xs text-neutral-400">{project?.shapes.length ?? 0} shapes · {workspace?.tabs.length ?? 0} tabs</div>
           </Section>
         </aside>
 
         {/* RIGHT — editor */}
         <main className="relative flex min-w-0 flex-1 flex-col">
+          {/* Tab bar */}
+          <div className="flex items-stretch gap-0.5 overflow-x-auto border-b border-neutral-200 bg-neutral-100 px-1 pt-1">
+            {(workspace?.tabs ?? []).map((t) => {
+              const active = t.id === workspace?.activeTabId;
+              return (
+                <div
+                  key={t.id}
+                  className={`group flex max-w-[10rem] items-center gap-1 rounded-t px-2 py-1.5 text-xs ${
+                    active
+                      ? "bg-white text-ink shadow-sm ring-1 ring-neutral-200 ring-b-white"
+                      : "bg-transparent text-neutral-600 hover:bg-neutral-50"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    className="min-w-0 flex-1 truncate text-left font-medium"
+                    onClick={() => switchTab(t.id)}
+                    onDoubleClick={() => renameTab(t.id)}
+                    title={`${t.title} (double-click to rename)`}
+                  >
+                    {t.title}
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded px-1 text-neutral-400 hover:bg-neutral-200 hover:text-neutral-800"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeTab(t.id);
+                    }}
+                    aria-label={`Close ${t.title}`}
+                  >
+                    ×
+                  </button>
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              onClick={addTab}
+              className="mb-0.5 ml-0.5 rounded px-2 py-1 text-sm text-neutral-600 hover:bg-neutral-200"
+              title="New tab"
+            >
+              +
+            </button>
+          </div>
+
           <div className="flex items-center gap-3 border-b border-neutral-200 bg-white px-4 py-2 text-sm">
             <label className="flex items-center gap-1.5">
               Underlay
