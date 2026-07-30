@@ -9,10 +9,15 @@ export type ShapeKind = "rect" | "poly";
 /** Synthetic id for the outer shell when selected in the canvas. */
 export const SHELL_ID = "__shell__";
 
+/** Vertex with optional outgoing bezier handle (absolute coords). */
+export type PolyVert = { p: Point; handleOut?: Point };
+
 export interface ManualShape {
   id: string;
   kind: ShapeKind;
-  points: Point[]; // image-pixel space; rect stored as its 4 corners
+  points: Point[]; // image-pixel space; rect stored as its 4 corners (always synced)
+  /** Bezier source-of-truth when present; anchors + optional handleOut. */
+  verts?: PolyVert[];
   category: Category;
   fill: string; // resolved hex (category default or custom override)
   name?: string;
@@ -29,8 +34,10 @@ export interface ManualProject {
   floor: string;
   bg: { dataUrl: string; width: number; height: number; opacity: number };
   shapes: ManualShape[];
-  /** Outer floor-plate polygon — clips units (optional). */
+  /** Outer floor-plate polygon — clips units (optional). Flattened points. */
   shell?: Point[] | null;
+  /** Bezier verts for shell when drawn with pen curves. */
+  shellVerts?: PolyVert[] | null;
   /** Stroke for tenant rect/poly (default white). */
   stroke?: ManualStroke;
   updatedAt: number;
@@ -90,6 +97,172 @@ export function newShapeId(): string {
 
 export function defaultFill(cat: Category): string {
   return CATEGORY_COLORS[cat] ?? "#CCCCCC";
+}
+
+export function shapeVerts(s: Pick<ManualShape, "points" | "verts">): PolyVert[] {
+  if (s.verts && s.verts.length >= 2) return s.verts;
+  return s.points.map((p) => ({ p }));
+}
+
+export function shellVertsOf(project: ManualProject): PolyVert[] | null {
+  if (project.shellVerts && project.shellVerts.length >= 3) return project.shellVerts;
+  if (project.shell && project.shell.length >= 3) return project.shell.map((p) => ({ p }));
+  return null;
+}
+
+export function syncShapeFromVerts(verts: PolyVert[]): { verts: PolyVert[]; points: Point[] } {
+  return { verts, points: flattenPolyVerts(verts) };
+}
+
+export function pathDFromVerts(verts: PolyVert[]): string {
+  if (verts.length === 0) return "";
+  const parts: string[] = [`M${verts[0].p[0].toFixed(1)},${verts[0].p[1].toFixed(1)}`];
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % verts.length];
+    if (!a.handleOut && !b.handleOut) {
+      parts.push(`L${b.p[0].toFixed(1)},${b.p[1].toFixed(1)}`);
+    } else {
+      const c1 = a.handleOut ?? lerpPt(a.p, b.p, 1 / 3);
+      const c2 = b.handleOut
+        ? ([2 * b.p[0] - b.handleOut[0], 2 * b.p[1] - b.handleOut[1]] as Point)
+        : lerpPt(a.p, b.p, 2 / 3);
+      parts.push(
+        `C${c1[0].toFixed(1)},${c1[1].toFixed(1)} ${c2[0].toFixed(1)},${c2[1].toFixed(1)} ${b.p[0].toFixed(1)},${b.p[1].toFixed(1)}`,
+      );
+    }
+  }
+  parts.push("Z");
+  return parts.join("");
+}
+
+/** Closest point on segment a→b to p; returns distance squared and t in [0,1]. */
+export function distToSegment(p: Point, a: Point, b: Point): { dist2: number; t: number; q: Point } {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  const t = len2 < 1e-12 ? 0 : Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2));
+  const q: Point = [a[0] + t * dx, a[1] + t * dy];
+  const ddx = p[0] - q[0];
+  const ddy = p[1] - q[1];
+  return { dist2: ddx * ddx + ddy * ddy, t, q };
+}
+
+/** Find nearest edge of a closed vert ring within maxDist (content units). */
+export function nearestEdge(
+  p: Point,
+  verts: PolyVert[],
+  maxDist: number,
+): { index: number; q: Point; dist: number } | null {
+  if (verts.length < 2) return null;
+  let best: { index: number; q: Point; dist: number } | null = null;
+  const max2 = maxDist * maxDist;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i].p;
+    const b = verts[(i + 1) % verts.length].p;
+    const { dist2, q } = distToSegment(p, a, b);
+    if (dist2 <= max2 && (!best || dist2 < best.dist * best.dist)) {
+      best = { index: i, q, dist: Math.sqrt(dist2) };
+    }
+  }
+  return best;
+}
+
+export function insertVertOnEdge(verts: PolyVert[], edgeIndex: number, q: Point): PolyVert[] {
+  const next: PolyVert[] = verts.map((v) => ({
+    p: [v.p[0], v.p[1]] as Point,
+    ...(v.handleOut ? { handleOut: [v.handleOut[0], v.handleOut[1]] as Point } : {}),
+  }));
+  // break curve: clear handleOut on the edge start so new corner is sharp
+  next[edgeIndex] = { p: next[edgeIndex].p };
+  next.splice(edgeIndex + 1, 0, { p: q });
+  return next;
+}
+
+/** Draft helpers below — cubic sampling for sync/export. */
+
+function lerpPt(a: Point, b: Point, t: number): Point {
+  return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+}
+
+function cubicAt(p0: Point, p1: Point, p2: Point, p3: Point, t: number): Point {
+  const u = 1 - t;
+  const tt = t * t;
+  const uu = u * u;
+  return [
+    uu * u * p0[0] + 3 * uu * t * p1[0] + 3 * u * tt * p2[0] + tt * t * p3[0],
+    uu * u * p0[1] + 3 * uu * t * p1[1] + 3 * u * tt * p2[1] + tt * t * p3[1],
+  ];
+}
+
+function sampleCubic(p0: Point, p1: Point, p2: Point, p3: Point, n: number): Point[] {
+  const out: Point[] = [];
+  for (let i = 0; i <= n; i++) out.push(cubicAt(p0, p1, p2, p3, i / n));
+  return out;
+}
+
+/** Densify pen verts (with optional handles) into a closed-ready polyline. */
+export function flattenPolyVerts(verts: PolyVert[], samplesPerCurve = 12): Point[] {
+  if (verts.length === 0) return [];
+  if (verts.length === 1) return [verts[0].p];
+
+  const appendSegment = (out: Point[], a: PolyVert, b: PolyVert) => {
+    if (!a.handleOut && !b.handleOut) {
+      out.push(b.p);
+      return;
+    }
+    const c1 = a.handleOut ?? lerpPt(a.p, b.p, 1 / 3);
+    const c2 = b.handleOut
+      ? ([2 * b.p[0] - b.handleOut[0], 2 * b.p[1] - b.handleOut[1]] as Point)
+      : lerpPt(a.p, b.p, 2 / 3);
+    const pts = sampleCubic(a.p, c1, c2, b.p, samplesPerCurve);
+    for (let i = 1; i < pts.length; i++) out.push(pts[i]);
+  };
+
+  const out: Point[] = [verts[0].p];
+  for (let i = 0; i < verts.length - 1; i++) appendSegment(out, verts[i], verts[i + 1]);
+  // closing segment last → first
+  appendSegment(out, verts[verts.length - 1], verts[0]);
+  // drop duplicate close point (equals first) if last ≈ first
+  if (out.length > 1) {
+    const last = out[out.length - 1];
+    const first = out[0];
+    if (Math.abs(last[0] - first[0]) < 1e-6 && Math.abs(last[1] - first[1]) < 1e-6) out.pop();
+  }
+  return out.filter(
+    (p, i, arr) => i === 0 || p[0] !== arr[i - 1][0] || p[1] !== arr[i - 1][1],
+  );
+}
+
+/** Open preview path (no close) for in-progress pen + rubber-band to cursor. */
+export function flattenPolyVertsOpen(verts: PolyVert[], rubber?: Point, samplesPerCurve = 12): Point[] {
+  if (verts.length === 0) return rubber ? [rubber] : [];
+  const out: Point[] = [verts[0].p];
+  const appendSegment = (a: PolyVert, b: PolyVert) => {
+    if (!a.handleOut && !b.handleOut) {
+      out.push(b.p);
+      return;
+    }
+    const c1 = a.handleOut ?? lerpPt(a.p, b.p, 1 / 3);
+    const c2 = b.handleOut
+      ? ([2 * b.p[0] - b.handleOut[0], 2 * b.p[1] - b.handleOut[1]] as Point)
+      : lerpPt(a.p, b.p, 2 / 3);
+    const pts = sampleCubic(a.p, c1, c2, b.p, samplesPerCurve);
+    for (let i = 1; i < pts.length; i++) out.push(pts[i]);
+  };
+  for (let i = 0; i < verts.length - 1; i++) appendSegment(verts[i], verts[i + 1]);
+  if (rubber) {
+    const last = verts[verts.length - 1];
+    if (last.handleOut) {
+      const c1 = last.handleOut;
+      const c2 = lerpPt(last.p, rubber, 2 / 3);
+      const pts = sampleCubic(last.p, c1, c2, rubber, samplesPerCurve);
+      for (let i = 1; i < pts.length; i++) out.push(pts[i]);
+    } else {
+      out.push(rubber);
+    }
+  }
+  return out;
 }
 
 function shoelaceArea(ring: Point[]): number {
@@ -263,6 +436,7 @@ export function newProject(floor: string): ManualProject {
     bg: { dataUrl: "", width: 0, height: 0, opacity: 0.4 },
     shapes: [],
     shell: null,
+    shellVerts: null,
     stroke: { ...DEFAULT_STROKE },
     updatedAt: Date.now(),
   };

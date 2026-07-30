@@ -1,17 +1,25 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from "react";
 import type { Point } from "@/lib/types";
-import { pathD } from "@/lib/geometry";
 import {
+  flattenPolyVertsOpen,
   getStroke,
+  insertVertOnEdge,
+  nearestEdge,
+  pathDFromVerts,
+  shapeVerts,
+  shellVertsOf,
+  syncShapeFromVerts,
   SHELL_ID,
   type ManualProject,
   type ManualShape,
+  type PolyVert,
   type ShapeKind,
 } from "@/lib/manual";
 
 const BRAND = "#0D9488";
 const BRAND_SOFT = "#0D948822";
+const DRAG_THRESH_PX = 4;
 
 export type Tool = "select" | "rect" | "poly" | "outline";
 
@@ -21,14 +29,46 @@ interface Props {
   snap: boolean;
   gridSize: number;
   selectedId: string | null;
-  makeShape: (kind: ShapeKind, points: Point[]) => ManualShape;
+  makeShape: (kind: ShapeKind, points: Point[], verts?: PolyVert[]) => ManualShape;
   onSelect: (id: string | null) => void;
   onAddShape: (shape: ManualShape) => void;
-  onUpdateShape: (id: string, points: Point[]) => void;
-  onSetShell: (points: Point[]) => void;
+  onUpdateShapeVerts: (id: string, verts: PolyVert[]) => void;
+  onSetShell: (verts: PolyVert[]) => void;
+  onRequestTool?: (tool: Tool) => void;
 }
 
 type View = { scale: number; tx: number; ty: number };
+
+type PolyDraft = {
+  kind: "poly" | "outline";
+  verts: PolyVert[];
+  cur: Point;
+};
+
+type DragState = {
+  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "rect" | "polyPlace";
+  startClient: { x: number; y: number };
+  startContent: Point;
+  origVerts: PolyVert[];
+  vIdx: number;
+  handleOut?: Point;
+};
+
+function cloneVerts(verts: PolyVert[]): PolyVert[] {
+  return verts.map((v) => ({
+    p: [v.p[0], v.p[1]] as Point,
+    handleOut: v.handleOut ? ([v.handleOut[0], v.handleOut[1]] as Point) : undefined,
+  }));
+}
+
+function translateVerts(verts: PolyVert[], dx: number, dy: number): PolyVert[] {
+  return verts.map((v) => ({
+    p: [v.p[0] + dx, v.p[1] + dy] as Point,
+    handleOut: v.handleOut
+      ? ([v.handleOut[0] + dx, v.handleOut[1] + dy] as Point)
+      : undefined,
+  }));
+}
 
 export default function ManualCanvas({
   project,
@@ -39,43 +79,42 @@ export default function ManualCanvas({
   makeShape,
   onSelect,
   onAddShape,
-  onUpdateShape,
+  onUpdateShapeVerts,
   onSetShell,
+  onRequestTool,
 }: Props) {
   const { bg, shapes } = project;
-  const shell = project.shell && project.shell.length >= 3 ? project.shell : null;
+  const shellV = shellVertsOf(project);
   const tenantStroke = getStroke(project);
   const svgRef = useRef<SVGSVGElement>(null);
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
   const [hovered, setHovered] = useState<string | null>(null);
 
   const [rectDraft, setRectDraft] = useState<{ a: Point; b: Point } | null>(null);
-  const [poly, setPoly] = useState<{ pts: Point[]; cur: Point } | null>(null);
-  const [live, setLive] = useState<{ id: string; points: Point[] } | null>(null);
-  const liveRef = useRef<{ id: string; points: Point[] } | null>(null);
-  const setLiveEdit = (v: { id: string; points: Point[] } | null) => {
+  const [poly, setPoly] = useState<PolyDraft | null>(null);
+  const [placing, setPlacing] = useState<{ p: Point; handleOut?: Point } | null>(null);
+  const [live, setLive] = useState<{ id: string; verts: PolyVert[] } | null>(null);
+  const liveRef = useRef<{ id: string; verts: PolyVert[] } | null>(null);
+  const setLiveEdit = (v: { id: string; verts: PolyVert[] } | null) => {
     liveRef.current = v;
     setLive(v);
   };
 
-  const drag = useRef<{
-    mode: "none" | "pan" | "move" | "vertex" | "rect";
-    startClient: { x: number; y: number };
-    startContent: Point;
-    orig: Point[];
-    vIdx: number;
-  } | null>(null);
+  const drag = useRef<DragState | null>(null);
   const moved = useRef(false);
   const spaceHeld = useRef(false);
   const shiftHeld = useRef(false);
-  const polyRef = useRef<{ pts: Point[]; cur: Point } | null>(null);
+  const polyRef = useRef<PolyDraft | null>(null);
   useEffect(() => {
     polyRef.current = poly;
   }, [poly]);
 
   useEffect(() => {
     setRectDraft(null);
-    setPoly(null);
+    setPlacing(null);
+    if ((tool === "poly" || tool === "outline") && polyRef.current) {
+      setPoly((p) => (p ? { ...p, kind: tool } : p));
+    }
   }, [tool]);
 
   const toContent = useCallback(
@@ -94,21 +133,21 @@ export default function ManualCanvas({
     (p: Point, excludeId?: string): Point => {
       if (!snap) return p;
       const th = 10 / view.scale;
-      if (shell && excludeId !== SHELL_ID) {
-        for (const v of shell) {
-          if (Math.abs(v[0] - p[0]) < th && Math.abs(v[1] - p[1]) < th) return [v[0], v[1]];
+      if (shellV && excludeId !== SHELL_ID) {
+        for (const v of shellV) {
+          if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
         }
       }
       for (const s of shapes) {
         if (s.id === excludeId) continue;
-        for (const v of s.points) {
-          if (Math.abs(v[0] - p[0]) < th && Math.abs(v[1] - p[1]) < th) return [v[0], v[1]];
+        for (const v of shapeVerts(s)) {
+          if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
         }
       }
       const g = gridSize > 0 ? gridSize : 1;
       return [Math.round(p[0] / g) * g, Math.round(p[1] / g) * g];
     },
-    [snap, shapes, shell, view.scale, gridSize],
+    [snap, shapes, shellV, view.scale, gridSize],
   );
 
   function constrain(prev: Point, cur: Point): Point {
@@ -141,16 +180,40 @@ export default function ManualCanvas({
       mode: "pan",
       startClient: { x: e.clientX, y: e.clientY },
       startContent: [0, 0],
-      orig: [],
+      origVerts: [],
       vIdx: -1,
     };
     moved.current = false;
   };
 
   const drawingPolyLike = tool === "poly" || tool === "outline";
+  const draftPaused = !!poly && !drawingPolyLike;
+
+  const commitVerts = useCallback(
+    (id: string, verts: PolyVert[]) => {
+      if (id === SHELL_ID) onSetShell(verts);
+      else onUpdateShapeVerts(id, verts);
+    },
+    [onSetShell, onUpdateShapeVerts],
+  );
+
+  const commitPolyPlace = useCallback(
+    (anchor: Point, handleOut: Point | undefined, clientDist: number) => {
+      const kind = tool === "outline" ? "outline" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
+      const vert: PolyVert =
+        clientDist > DRAG_THRESH_PX && handleOut ? { p: anchor, handleOut } : { p: anchor };
+      setPoly((prev) => {
+        if (!prev) return { kind, verts: [vert], cur: anchor };
+        return { ...prev, kind, verts: [...prev.verts, vert], cur: anchor };
+      });
+      setPlacing(null);
+    },
+    [tool],
+  );
 
   const onBgMouseDown = (e: MouseEvent) => {
     if (e.button === 1 || spaceHeld.current) return beginPan(e);
+    if (e.button === 2) return;
     const c = toContent(e.clientX, e.clientY);
     if (tool === "rect") {
       const a = snapPoint(c);
@@ -158,7 +221,7 @@ export default function ManualCanvas({
         mode: "rect",
         startClient: { x: e.clientX, y: e.clientY },
         startContent: a,
-        orig: [],
+        origVerts: [],
         vIdx: -1,
       };
       setRectDraft({ a, b: a });
@@ -170,13 +233,33 @@ export default function ManualCanvas({
     }
   };
 
+  const onPolyMouseDown = (e: MouseEvent) => {
+    if (!drawingPolyLike || e.button !== 0 || spaceHeld.current) return;
+    e.stopPropagation();
+    let c = toContent(e.clientX, e.clientY);
+    c = snapPoint(c);
+    if (shiftHeld.current && poly?.verts.length) {
+      c = constrain(poly.verts[poly.verts.length - 1].p, c);
+    }
+    drag.current = {
+      mode: "polyPlace",
+      startClient: { x: e.clientX, y: e.clientY },
+      startContent: c,
+      origVerts: [],
+      vIdx: -1,
+    };
+    moved.current = false;
+    setPlacing({ p: c });
+  };
+
   const onMouseMove = (e: MouseEvent) => {
-    if (drawingPolyLike && poly) {
+    if (drawingPolyLike && poly && drag.current?.mode !== "polyPlace") {
       let cur = toContent(e.clientX, e.clientY);
       cur = snapPoint(cur);
-      if (shiftHeld.current && poly.pts.length) cur = constrain(poly.pts[poly.pts.length - 1], cur);
+      if (shiftHeld.current && poly.verts.length) cur = constrain(poly.verts[poly.verts.length - 1].p, cur);
       setPoly({ ...poly, cur });
     }
+
     const dstate = drag.current;
     if (!dstate) return;
     const dxC = e.clientX - dstate.startClient.x;
@@ -190,22 +273,53 @@ export default function ManualCanvas({
       let b = toContent(e.clientX, e.clientY);
       b = snapPoint(b);
       setRectDraft({ a: dstate.startContent, b });
+    } else if (dstate.mode === "polyPlace") {
+      let h = toContent(e.clientX, e.clientY);
+      h = snapPoint(h);
+      if (shiftHeld.current) h = constrain(dstate.startContent, h);
+      dstate.handleOut = h;
+      if (Math.hypot(dxC, dyC) > DRAG_THRESH_PX) setPlacing({ p: dstate.startContent, handleOut: h });
+      else setPlacing({ p: dstate.startContent });
     } else if (dstate.mode === "move" && selectedId) {
       const dx = dxC / view.scale;
       const dy = dyC / view.scale;
-      setLiveEdit({ id: selectedId, points: dstate.orig.map(([x, y]) => [x + dx, y + dy] as Point) });
+      setLiveEdit({ id: selectedId, verts: translateVerts(dstate.origVerts, dx, dy) });
     } else if (dstate.mode === "vertex" && selectedId && dstate.vIdx >= 0) {
       let p = toContent(e.clientX, e.clientY);
       p = snapPoint(p, selectedId);
-      const pts = dstate.orig.map((q, i) => (i === dstate.vIdx ? p : ([q[0], q[1]] as Point)));
-      setLiveEdit({ id: selectedId, points: pts });
+      const orig = dstate.origVerts[dstate.vIdx];
+      const dx = p[0] - orig.p[0];
+      const dy = p[1] - orig.p[1];
+      const verts = cloneVerts(dstate.origVerts);
+      verts[dstate.vIdx] = {
+        p,
+        handleOut: orig.handleOut
+          ? ([orig.handleOut[0] + dx, orig.handleOut[1] + dy] as Point)
+          : undefined,
+      };
+      setLiveEdit({ id: selectedId, verts });
+    } else if (dstate.mode === "bezier" && selectedId && dstate.vIdx >= 0) {
+      let h = toContent(e.clientX, e.clientY);
+      h = snapPoint(h, selectedId);
+      if (shiftHeld.current) {
+        const anchor = dstate.origVerts[dstate.vIdx].p;
+        h = constrain(anchor, h);
+      }
+      const verts = cloneVerts(dstate.origVerts);
+      verts[dstate.vIdx] = { ...verts[dstate.vIdx], handleOut: h };
+      setLiveEdit({ id: selectedId, verts });
     }
   };
 
-  const onMouseUp = () => {
+  const onMouseUp = (e: MouseEvent) => {
     const dstate = drag.current;
     drag.current = null;
     if (!dstate) return;
+    if (dstate.mode === "polyPlace") {
+      const dist = Math.hypot(e.clientX - dstate.startClient.x, e.clientY - dstate.startClient.y);
+      commitPolyPlace(dstate.startContent, dstate.handleOut, dist);
+      return;
+    }
     if (dstate.mode === "rect" && rectDraft) {
       const { a, b } = rectDraft;
       setRectDraft(null);
@@ -222,14 +336,12 @@ export default function ManualCanvas({
           [x1, y1],
           [x0, y1],
         ];
-        onAddShape(makeShape("rect", corners));
+        const verts = corners.map((p) => ({ p }));
+        onAddShape(makeShape("rect", corners, verts));
       }
-    } else if (dstate.mode === "move" || dstate.mode === "vertex") {
+    } else if (dstate.mode === "move" || dstate.mode === "vertex" || dstate.mode === "bezier") {
       const committed = liveRef.current;
-      if (committed) {
-        if (committed.id === SHELL_ID) onSetShell(committed.points);
-        else onUpdateShape(committed.id, committed.points);
-      }
+      if (committed) commitVerts(committed.id, committed.verts);
       setLiveEdit(null);
     }
   };
@@ -238,36 +350,58 @@ export default function ManualCanvas({
     if (tool === "select" && !moved.current) onSelect(null);
   };
 
-  const onSvgMouseDownCapturePoly = (e: MouseEvent) => {
-    if (!drawingPolyLike || e.button !== 0 || spaceHeld.current) return;
-    let c = toContent(e.clientX, e.clientY);
-    c = snapPoint(c);
-    setPoly((prev) => {
-      if (!prev) return { pts: [c], cur: c };
-      const last = prev.pts[prev.pts.length - 1];
-      const pt = shiftHeld.current ? constrain(last, c) : c;
-      return { pts: [...prev.pts, pt], cur: pt };
-    });
+  const onContextMenu = (e: MouseEvent) => {
+    e.preventDefault();
+    if (tool !== "select" || spaceHeld.current) return;
+    const c = toContent(e.clientX, e.clientY);
+    const maxDist = 12 / view.scale;
+
+    // prefer selected shape/shell, then any shape
+    const candidates: { id: string; verts: PolyVert[] }[] = [];
+    if (selectedId === SHELL_ID && shellV) candidates.push({ id: SHELL_ID, verts: shellV });
+    else if (selectedId) {
+      const s = shapes.find((x) => x.id === selectedId);
+      if (s) candidates.push({ id: s.id, verts: shapeVerts(s) });
+    }
+    if (shellV && selectedId !== SHELL_ID) candidates.push({ id: SHELL_ID, verts: shellV });
+    for (const s of shapes) {
+      if (s.id !== selectedId) candidates.push({ id: s.id, verts: shapeVerts(s) });
+    }
+
+    let hit: { id: string; edgeIndex: number; q: Point; dist: number } | null = null;
+    for (const cand of candidates) {
+      const edge = nearestEdge(c, cand.verts, maxDist);
+      if (edge && (!hit || edge.dist < hit.dist)) {
+        hit = { id: cand.id, edgeIndex: edge.index, q: edge.q, dist: edge.dist };
+      }
+    }
+    if (!hit) return;
+    const src =
+      hit.id === SHELL_ID
+        ? shellV!
+        : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
+    const next = insertVertOnEdge(src, hit.edgeIndex, hit.q);
+    commitVerts(hit.id, next);
+    onSelect(hit.id);
   };
 
   const closePoly = useCallback(() => {
     const prev = polyRef.current;
-    if (prev) {
-      const clean = prev.pts.filter(
-        (p, i) => i === 0 || p[0] !== prev.pts[i - 1][0] || p[1] !== prev.pts[i - 1][1],
-      );
-      if (clean.length >= 3) {
-        if (tool === "outline") {
-          onSetShell(clean);
+    polyRef.current = null;
+    setPoly(null);
+    setPlacing(null);
+    if (prev && prev.verts.length >= 3) {
+      const synced = syncShapeFromVerts(prev.verts);
+      if (synced.points.length >= 3) {
+        if (prev.kind === "outline") {
+          onSetShell(synced.verts);
           onSelect(SHELL_ID);
         } else {
-          onAddShape(makeShape("poly", clean));
+          onAddShape(makeShape("poly", synced.points, synced.verts));
         }
       }
     }
-    polyRef.current = null;
-    setPoly(null);
-  }, [onAddShape, makeShape, onSetShell, onSelect, tool]);
+  }, [onAddShape, makeShape, onSetShell, onSelect]);
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
@@ -282,18 +416,18 @@ export default function ManualCanvas({
       if (e.key === "Escape") {
         polyRef.current = null;
         setPoly(null);
+        setPlacing(null);
       }
-      // ⌘Z / Ctrl+Z — undo last vertex while tracing poly or outline
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "z" && !e.shiftKey && drawingPolyLike) {
         const prev = polyRef.current;
-        if (!prev?.pts.length) return;
+        if (!prev?.verts.length) return;
         e.preventDefault();
-        const pts = prev.pts.slice(0, -1);
-        if (pts.length === 0) {
+        const verts = prev.verts.slice(0, -1);
+        if (verts.length === 0) {
           polyRef.current = null;
           setPoly(null);
         } else {
-          const next = { pts, cur: prev.cur };
+          const next = { ...prev, verts, cur: verts[verts.length - 1].p };
           polyRef.current = next;
           setPoly(next);
         }
@@ -313,28 +447,41 @@ export default function ManualCanvas({
 
   const resetView = () => setView({ scale: 1, tx: 0, ty: 0 });
 
-  const beginVertexDrag = (e: MouseEvent, points: Point[], i: number, id: string) => {
+  const beginVertexDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
     e.stopPropagation();
     onSelect(id);
     drag.current = {
       mode: "vertex",
       startClient: { x: e.clientX, y: e.clientY },
       startContent: [0, 0],
-      orig: points.map(([x, y]) => [x, y] as Point),
+      origVerts: cloneVerts(verts),
       vIdx: i,
     };
     moved.current = false;
   };
 
-  const beginMove = (e: MouseEvent, points: Point[], id: string) => {
-    if (tool !== "select" || spaceHeld.current) return;
+  const beginBezierDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
+    e.stopPropagation();
+    onSelect(id);
+    drag.current = {
+      mode: "bezier",
+      startClient: { x: e.clientX, y: e.clientY },
+      startContent: [0, 0],
+      origVerts: cloneVerts(verts),
+      vIdx: i,
+    };
+    moved.current = false;
+  };
+
+  const beginMove = (e: MouseEvent, verts: PolyVert[], id: string) => {
+    if (tool !== "select" || spaceHeld.current || e.button !== 0) return;
     e.stopPropagation();
     onSelect(id);
     drag.current = {
       mode: "move",
       startClient: { x: e.clientX, y: e.clientY },
       startContent: [0, 0],
-      orig: points.map(([x, y]) => [x, y] as Point),
+      origVerts: cloneVerts(verts),
       vIdx: -1,
     };
     moved.current = false;
@@ -344,20 +491,30 @@ export default function ManualCanvas({
   const strokeW = tenantStroke.width;
   const handleR = 5 / view.scale;
 
-  const shellLive =
-    live && live.id === SHELL_ID ? live.points : shell;
+  const liveVertsFor = (id: string, fallback: PolyVert[]) =>
+    live && live.id === id ? live.verts : fallback;
+
+  const shellLive = shellV ? liveVertsFor(SHELL_ID, shellV) : null;
   const isShellSel = selectedId === SHELL_ID;
-  const handlePts =
-    tool === "select" && isShellSel && shellLive
+
+  const selectedShape = selectedId && selectedId !== SHELL_ID ? shapes.find((s) => s.id === selectedId) : null;
+  const selectedVerts = selectedShape
+    ? liveVertsFor(selectedShape.id, shapeVerts(selectedShape))
+    : isShellSel && shellLive
       ? shellLive
-      : tool === "select" && selectedId && selectedId !== SHELL_ID
-        ? live && live.id === selectedId
-          ? live.points
-          : shapes.find((x) => x.id === selectedId)?.points ?? null
-        : null;
+      : null;
 
   const cursorClass =
     tool === "select" ? "cursor-default active:cursor-grabbing" : "cursor-crosshair";
+
+  const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
+  const draftVerts: PolyVert[] = placing
+    ? [...(poly?.verts ?? []), { p: placing.p, handleOut: placing.handleOut }]
+    : poly?.verts ?? [];
+  const previewPts =
+    draftVerts.length > 0
+      ? flattenPolyVertsOpen(draftVerts, drawingPolyLike && !placing && poly ? poly.cur : undefined)
+      : [];
 
   return (
     <div className="relative h-full w-full overflow-hidden checkerboard">
@@ -369,25 +526,48 @@ export default function ManualCanvas({
           {Math.round(view.scale * 100)}%
         </span>
       </div>
+
+      {draftPaused && poly && (
+        <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink/90 px-3 py-1.5 text-xs text-white shadow">
+          <span>
+            {poly.kind === "outline" ? "Outline" : "Polygon"} in progress ({poly.verts.length} pts)
+          </span>
+          <button
+            type="button"
+            className="rounded bg-brand px-2 py-0.5 font-medium text-white"
+            onClick={() => onRequestTool?.(poly.kind)}
+          >
+            Continue ({poly.kind === "outline" ? "O" : "P"})
+          </button>
+          <span className="text-white/60">Esc cancel · Space pan</span>
+        </div>
+      )}
+
       <svg
         ref={svgRef}
         className={`h-full w-full ${cursorClass}`}
         viewBox={`0 0 ${bg.width || 1} ${bg.height || 1}`}
         onWheel={onWheel}
+        onContextMenu={onContextMenu}
         onMouseDown={(e) => {
-          onSvgMouseDownCapturePoly(e);
+          onPolyMouseDown(e);
           onBgMouseDown(e);
         }}
         onMouseMove={onMouseMove}
         onMouseUp={onMouseUp}
-        onMouseLeave={() => (drag.current = null)}
+        onMouseLeave={() => {
+          if (drag.current?.mode === "polyPlace") {
+            commitPolyPlace(drag.current.startContent, undefined, 0);
+          }
+          drag.current = null;
+        }}
         onClick={onSvgClick}
         onDoubleClick={() => drawingPolyLike && closePoly()}
       >
         <defs>
           {shellLive && (
             <clipPath id="manual-shell">
-              <path d={pathD(shellLive)} />
+              <path d={pathDFromVerts(shellLive)} />
             </clipPath>
           )}
         </defs>
@@ -405,26 +585,25 @@ export default function ManualCanvas({
             />
           )}
 
-          {/* shell fill under units (clipped look) */}
           {shellLive && (
-            <path
-              d={pathD(shellLive)}
-              fill="#ECECEC88"
-              stroke="none"
-              pointerEvents="none"
-            />
+            <path d={pathDFromVerts(shellLive)} fill="#ECECEC88" stroke="none" pointerEvents="none" />
           )}
 
-          {/* units clipped to shell */}
           <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
             {shapes.map((s) => {
-              const pts = live && live.id === s.id ? live.points : s.points;
+              const verts = liveVertsFor(s.id, shapeVerts(s));
               return (
-                <path key={`f-${s.id}`} d={pathD(pts)} fill={s.fill} stroke="none" pointerEvents="none" />
+                <path
+                  key={`f-${s.id}`}
+                  d={pathDFromVerts(verts)}
+                  fill={s.fill}
+                  stroke="none"
+                  pointerEvents="none"
+                />
               );
             })}
             {shapes.map((s) => {
-              const pts = live && live.id === s.id ? live.points : s.points;
+              const verts = liveVertsFor(s.id, shapeVerts(s));
               const isSel = s.id === selectedId;
               const isHov = hovered === s.id;
               const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
@@ -432,7 +611,7 @@ export default function ManualCanvas({
               return (
                 <path
                   key={`o-${s.id}`}
-                  d={pathD(pts)}
+                  d={pathDFromVerts(verts)}
                   fill="none"
                   stroke={stroke}
                   strokeWidth={sw}
@@ -444,10 +623,9 @@ export default function ManualCanvas({
             })}
           </g>
 
-          {/* shell black outline (drawn above units so perimeter stays visible) */}
           {shellLive && (
             <path
-              d={pathD(shellLive)}
+              d={pathDFromVerts(shellLive)}
               fill="none"
               stroke={isShellSel ? BRAND : "#000000"}
               strokeWidth={isShellSel ? strokeW * 2 : Math.max(strokeW * 1.5, 2)}
@@ -459,42 +637,70 @@ export default function ManualCanvas({
             />
           )}
 
-          {/* hit targets for units (outside clip so edges stay grabbable) */}
           {tool === "select" &&
             shapes.map((s) => {
-              const pts = live && live.id === s.id ? live.points : s.points;
+              const verts = liveVertsFor(s.id, shapeVerts(s));
               return (
                 <path
                   key={`h-${s.id}`}
-                  d={pathD(pts)}
+                  d={pathDFromVerts(verts)}
                   fill="transparent"
                   stroke="none"
                   className="cursor-move"
                   onMouseEnter={() => setHovered(s.id)}
                   onMouseLeave={() => setHovered(null)}
                   onClick={(e) => e.stopPropagation()}
-                  onMouseDown={(e) => beginMove(e, s.points, s.id)}
+                  onMouseDown={(e) => beginMove(e, verts, s.id)}
                 />
               );
             })}
 
-          {/* vertex handles */}
-          {handlePts &&
-            handlePts.map((p, i) => (
-              <circle
-                key={i}
-                cx={p[0]}
-                cy={p[1]}
-                r={handleR}
-                fill="#FFFFFF"
-                stroke={BRAND}
-                strokeWidth={uiSw}
-                className="cursor-pointer"
-                onClick={(e) => e.stopPropagation()}
-                onMouseDown={(e) =>
-                  beginVertexDrag(e, handlePts, i, isShellSel ? SHELL_ID : selectedId!)
-                }
-              />
+          {/* anchors + bezier handles for selection */}
+          {tool === "select" &&
+            selectedVerts &&
+            selectedVerts.map((v, i) => (
+              <g key={`ah-${i}`}>
+                {v.handleOut && (
+                  <>
+                    <line
+                      x1={v.p[0]}
+                      y1={v.p[1]}
+                      x2={v.handleOut[0]}
+                      y2={v.handleOut[1]}
+                      stroke={BRAND}
+                      strokeWidth={uiSw * 0.7}
+                      opacity={0.55}
+                      pointerEvents="none"
+                    />
+                    <circle
+                      cx={v.handleOut[0]}
+                      cy={v.handleOut[1]}
+                      r={handleR * 0.75}
+                      fill="#fff"
+                      stroke={BRAND}
+                      strokeWidth={uiSw}
+                      className="cursor-pointer"
+                      onClick={(e) => e.stopPropagation()}
+                      onMouseDown={(e) =>
+                        beginBezierDrag(e, selectedVerts, i, isShellSel ? SHELL_ID : selectedId!)
+                      }
+                    />
+                  </>
+                )}
+                <circle
+                  cx={v.p[0]}
+                  cy={v.p[1]}
+                  r={handleR}
+                  fill="#FFFFFF"
+                  stroke={BRAND}
+                  strokeWidth={uiSw}
+                  className="cursor-pointer"
+                  onClick={(e) => e.stopPropagation()}
+                  onMouseDown={(e) =>
+                    beginVertexDrag(e, selectedVerts, i, isShellSel ? SHELL_ID : selectedId!)
+                  }
+                />
+              </g>
             ))}
 
           {rectDraft && (
@@ -510,33 +716,69 @@ export default function ManualCanvas({
             />
           )}
 
-          {poly && poly.pts.length > 0 && (
-            <g pointerEvents="none">
-              <polyline
-                points={[...poly.pts, poly.cur].map((p) => `${p[0]},${p[1]}`).join(" ")}
-                fill="none"
-                stroke={tool === "outline" ? "#111827" : BRAND}
-                strokeWidth={uiSw}
-                strokeDasharray={`${4 / view.scale} ${3 / view.scale}`}
-              />
-              {poly.pts.map((p, i) => (
-                <circle
-                  key={i}
-                  cx={p[0]}
-                  cy={p[1]}
-                  r={handleR}
-                  fill={tool === "outline" ? "#111827" : BRAND}
+          {(poly || placing) && (
+            <g pointerEvents="none" opacity={draftPaused ? 0.55 : 1}>
+              {previewPts.length > 1 && (
+                <polyline
+                  points={previewPts.map((p) => `${p[0]},${p[1]}`).join(" ")}
+                  fill="none"
+                  stroke={previewStroke}
+                  strokeWidth={uiSw}
+                  strokeDasharray={drawingPolyLike ? `${4 / view.scale} ${3 / view.scale}` : undefined}
                 />
+              )}
+              {(poly?.verts ?? []).map((v, i) => (
+                <g key={i}>
+                  {v.handleOut && (
+                    <line
+                      x1={v.p[0]}
+                      y1={v.p[1]}
+                      x2={v.handleOut[0]}
+                      y2={v.handleOut[1]}
+                      stroke={previewStroke}
+                      strokeWidth={uiSw * 0.7}
+                      opacity={0.5}
+                    />
+                  )}
+                  <circle cx={v.p[0]} cy={v.p[1]} r={handleR} fill={previewStroke} />
+                </g>
               ))}
+              {placing && (
+                <>
+                  {placing.handleOut && (
+                    <line
+                      x1={placing.p[0]}
+                      y1={placing.p[1]}
+                      x2={placing.handleOut[0]}
+                      y2={placing.handleOut[1]}
+                      stroke={previewStroke}
+                      strokeWidth={uiSw * 0.7}
+                      opacity={0.6}
+                    />
+                  )}
+                  <circle cx={placing.p[0]} cy={placing.p[1]} r={handleR} fill={previewStroke} />
+                  {placing.handleOut && (
+                    <circle
+                      cx={placing.handleOut[0]}
+                      cy={placing.handleOut[1]}
+                      r={handleR * 0.7}
+                      fill="#fff"
+                      stroke={previewStroke}
+                      strokeWidth={uiSw}
+                    />
+                  )}
+                </>
+              )}
             </g>
           )}
         </g>
       </svg>
 
-      {drawingPolyLike && poly && (
+      {drawingPolyLike && (poly || placing) && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
-          {tool === "outline" ? "Outline" : "Polygon"} · {poly.pts.length} pts · ⌘Z undo point ·
-          double-click or Enter to close · Esc cancel · Shift = straight
+          {poly?.kind === "outline" || tool === "outline" ? "Outline" : "Polygon"} ·{" "}
+          {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
+          pan · ⌘Z undo · Enter close · Esc cancel
         </div>
       )}
     </div>

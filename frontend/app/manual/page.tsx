@@ -20,9 +20,11 @@ import {
   newShapeId,
   saveProject,
   seedFromGeometry,
+  syncShapeFromVerts,
   SHELL_ID,
   type ManualProject,
   type ManualShape,
+  type PolyVert,
   type ShapeKind,
 } from "@/lib/manual";
 
@@ -121,10 +123,11 @@ export default function ManualPage() {
 
   // ---- shape ops ----
   const makeShape = useCallback(
-    (kind: ShapeKind, points: Point[]): ManualShape => ({
+    (kind: ShapeKind, points: Point[], verts?: PolyVert[]): ManualShape => ({
       id: newShapeId(),
       kind,
       points,
+      verts,
       category: drawCat,
       fill: defaultFill(drawCat),
     }),
@@ -137,8 +140,18 @@ export default function ManualPage() {
     setTool("select");
   }, []);
 
-  const updateShapePoints = useCallback((id: string, points: Point[]) => {
-    setProject((p) => (p ? { ...p, shapes: p.shapes.map((s) => (s.id === id ? { ...s, points } : s)) } : p));
+  const updateShapeVerts = useCallback((id: string, verts: PolyVert[]) => {
+    const synced = syncShapeFromVerts(verts);
+    setProject((p) =>
+      p
+        ? {
+            ...p,
+            shapes: p.shapes.map((s) =>
+              s.id === id ? { ...s, verts: synced.verts, points: synced.points } : s,
+            ),
+          }
+        : p,
+    );
   }, []);
 
   const patchShape = useCallback((id: string, patch: Partial<ManualShape>) => {
@@ -149,7 +162,7 @@ export default function ManualPage() {
     if (!selectedId) return;
     if (selectedId === SHELL_ID) {
       if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
-      setProject((p) => (p ? { ...p, shell: null } : p));
+      setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
       setSelectedId(null);
       return;
     }
@@ -158,14 +171,15 @@ export default function ManualPage() {
     setSelectedId(null);
   }, [selectedId]);
 
-  const setShell = useCallback((points: Point[]) => {
-    setProject((p) => (p ? { ...p, shell: points } : p));
+  const setShell = useCallback((verts: PolyVert[]) => {
+    const points = syncShapeFromVerts(verts).points;
+    setProject((p) => (p ? { ...p, shell: points, shellVerts: verts } : p));
     setTool("select");
   }, []);
 
   const clearShell = useCallback(() => {
     if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
-    setProject((p) => (p ? { ...p, shell: null } : p));
+    setProject((p) => (p ? { ...p, shell: null, shellVerts: null } : p));
     if (selectedId === SHELL_ID) setSelectedId(null);
   }, [selectedId]);
 
@@ -175,10 +189,15 @@ export default function ManualPage() {
       if (!p) return p;
       const src = p.shapes.find((s) => s.id === selectedId);
       if (!src) return p;
+      const shift = (pt: Point): Point => [pt[0] + 16, pt[1] + 16];
       const copy: ManualShape = {
         ...src,
         id: newShapeId(),
-        points: src.points.map(([x, y]) => [x + 16, y + 16] as Point),
+        points: src.points.map(shift),
+        verts: src.verts?.map((v) => ({
+          p: shift(v.p),
+          handleOut: v.handleOut ? shift(v.handleOut) : undefined,
+        })),
       };
       setSelectedId(copy.id);
       return { ...p, shapes: [...p.shapes, copy] };
@@ -509,9 +528,12 @@ export default function ManualPage() {
             <div className="flex-1" />
             <span className="text-xs text-neutral-500">
               {tool === "rect" && "Drag to draw a box"}
-              {tool === "poly" && "Click to add points · double-click / Enter to close"}
-              {tool === "outline" && "Trace outer boundary · double-click / Enter to close"}
-              {tool === "select" && "Click to select · drag to move · drag handles to edit"}
+              {tool === "poly" &&
+                "Click = corner · drag = curve · right-click edge = add point · Space = pan"}
+              {tool === "outline" &&
+                "Trace outer boundary · click/drag curves · Space = pan"}
+              {tool === "select" &&
+                "Drag anchors/handles to edit curves · right-click edge = add point · Space = pan"}
             </span>
           </div>
 
@@ -526,8 +548,9 @@ export default function ManualPage() {
                 makeShape={makeShape}
                 onSelect={setSelectedId}
                 onAddShape={addShape}
-                onUpdateShape={updateShapePoints}
+                onUpdateShapeVerts={updateShapeVerts}
                 onSetShell={setShell}
+                onRequestTool={setTool}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-neutral-400">
