@@ -116,6 +116,7 @@ export default function ManualCanvas({
   const spaceHeld = useRef(false);
   const shiftHeld = useRef(false);
   const altHeld = useRef(false);
+  const ctrlHeld = useRef(false);
   const polyRef = useRef<PolyDraft | null>(null);
   useEffect(() => {
     polyRef.current = poly;
@@ -358,8 +359,9 @@ export default function ManualCanvas({
       const dy = dySvg / view.scale;
       setLiveEdit({ id: selectedId, verts: translateVerts(dstate.origVerts, dx, dy) });
     } else if (dstate.mode === "vertex" && selectedId && dstate.vIdx >= 0) {
+      const precise = e.ctrlKey || e.metaKey || ctrlHeld.current;
       let p = toContent(e.clientX, e.clientY);
-      p = snapPoint(p, selectedId);
+      if (!precise) p = snapPoint(p, selectedId);
       const orig = dstate.origVerts[dstate.vIdx];
       const dx = p[0] - orig.p[0];
       const dy = p[1] - orig.p[1];
@@ -372,8 +374,9 @@ export default function ManualCanvas({
       };
       setLiveEdit({ id: selectedId, verts });
     } else if (dstate.mode === "bezier" && selectedId && dstate.vIdx >= 0) {
+      const precise = e.ctrlKey || e.metaKey || ctrlHeld.current;
       let h = toContent(e.clientX, e.clientY);
-      h = snapPoint(h, selectedId);
+      if (!precise) h = snapPoint(h, selectedId);
       if (shiftHeld.current) {
         const anchor = dstate.origVerts[dstate.vIdx].p;
         h = constrain(anchor, h);
@@ -382,8 +385,9 @@ export default function ManualCanvas({
       verts[dstate.vIdx] = { ...verts[dstate.vIdx], handleOut: h };
       setLiveEdit({ id: selectedId, verts });
     } else if (dstate.mode === "bend" && selectedId && dstate.vIdx >= 0) {
+      const precise = e.ctrlKey || e.metaKey || ctrlHeld.current;
       let h = toContent(e.clientX, e.clientY);
-      h = snapPoint(h, selectedId);
+      if (!precise) h = snapPoint(h, selectedId);
       setLiveEdit({ id: selectedId, verts: bendEdge(dstate.origVerts, dstate.vIdx, h) });
     }
   };
@@ -502,6 +506,7 @@ export default function ManualCanvas({
         altHeld.current = true;
         e.preventDefault();
       }
+      if (e.key === "Control" || e.key === "Meta") ctrlHeld.current = true;
       if (e.key === "Enter" && drawingPolyLike) closePoly();
       if (e.key === "Escape") {
         polyRef.current = null;
@@ -528,6 +533,7 @@ export default function ManualCanvas({
       if (e.code === "Space") spaceHeld.current = false;
       if (e.key === "Shift") shiftHeld.current = false;
       if (e.key === "Alt") altHeld.current = false;
+      if (e.key === "Control" || e.key === "Meta") ctrlHeld.current = false;
     };
     window.addEventListener("keydown", kd);
     window.addEventListener("keyup", ku);

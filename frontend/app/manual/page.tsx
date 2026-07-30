@@ -594,7 +594,7 @@ export default function ManualPage() {
               {tool === "outline" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "select" &&
-                "Alt-drag edge = curve · click point then ⌫ = delete point · right-click edge = add point"}
+                "Alt-drag edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}
             </span>
           </div>
 
