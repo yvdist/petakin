@@ -95,7 +95,8 @@ export function mergeUnits(geo: Geometry, ids: Set<string>): Geometry {
 // Rasterize an SVG string to a transparent PNG blob via canvas (scale = px multiplier).
 export function svgToPngBlob(svg: string, viewW: number, viewH: number, scale = 2): Promise<Blob> {
   return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml" }));
+    // data: URL is more reliable than blob: for SVG fills/strokes in some browsers
+    const url = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
     const img = new Image();
     img.onload = () => {
       const canvas = document.createElement("canvas");
@@ -103,23 +104,19 @@ export function svgToPngBlob(svg: string, viewW: number, viewH: number, scale = 
       canvas.height = Math.round(viewH * scale);
       const ctx = canvas.getContext("2d");
       if (!ctx) {
-        URL.revokeObjectURL(url);
         return reject(new Error("no 2d ctx"));
       }
       ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-      URL.revokeObjectURL(url);
       canvas.toBlob((b) => (b ? resolve(b) : reject(new Error("toBlob failed"))), "image/png");
     };
-    img.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("svg image load failed"));
-    };
+    img.onerror = () => reject(new Error("svg image load failed"));
     img.src = url;
   });
 }
 
 export function download(filename: string, data: Blob | string, mime = "text/plain") {
-  const blob = typeof data === "string" ? new Blob([data], { type: mime }) : data;
+  const type = mime.includes("svg") && !mime.includes("charset") ? `${mime};charset=utf-8` : mime;
+  const blob = typeof data === "string" ? new Blob([data], { type }) : data;
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;

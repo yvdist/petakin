@@ -710,11 +710,26 @@ function shoelaceArea(ring: Point[]): number {
 // ---- export: normalize + emit grouped SVG ----
 
 function esc(s: string): string {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 function d(points: Point[]): string {
   return "M" + points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" ") + "Z";
+}
+
+/** Ensure fill is a usable SVG hex (color input / overrides). */
+function exportFill(fill: string | undefined, category: Category): string {
+  const raw = (fill ?? "").trim();
+  if (/^#[0-9A-Fa-f]{3,8}$/.test(raw)) return raw;
+  if (/^[0-9A-Fa-f]{6}$/.test(raw)) return `#${raw}`;
+  return defaultFill(category);
+}
+
+function normVert(v: PolyVert, norm: (p: Point) => Point): PolyVert {
+  return {
+    p: norm(v.p),
+    handleOut: v.handleOut ? norm(v.handleOut) : undefined,
+  };
 }
 
 export function emitManualSvg(
@@ -729,7 +744,7 @@ export function emitManualSvg(
   const badge = cfg.badge;
   const shellPts = project.shell && project.shell.length >= 3 ? project.shell : null;
 
-  // bbox over shell + shapes (fall back to bg dims when empty)
+  // bbox over shell + shapes (prefer densified / vert rings)
   let x0 = Infinity,
     y0 = Infinity,
     x1 = -Infinity,
@@ -744,7 +759,9 @@ export function emitManualSvg(
   };
   if (shellPts) consider(shellPts);
   for (const s of project.shapes) {
-    if (isShapeVisible(project, s.id)) consider(s.points);
+    if (!isShapeVisible(project, s.id)) continue;
+    const ring = s.points?.length >= 3 ? s.points : flattenPolyVerts(shapeVerts(s));
+    consider(ring);
   }
   if (!isFinite(x0)) {
     x0 = 0;
@@ -763,11 +780,9 @@ export function emitManualSvg(
   const bcx = planWidth + gutter / 2;
   const bcy = 150;
 
-  const normedShapes = project.shapes
-    .filter((s) => isShapeVisible(project, s.id))
-    .map((s) => ({ ...s, npoints: s.points.map(norm) }));
-  const cats = CATEGORY_ORDER.filter((c) => normedShapes.some((s) => s.category === c));
-  for (const s of normedShapes) if (!cats.includes(s.category)) cats.push(s.category);
+  const visibleShapes = project.shapes.filter((s) => isShapeVisible(project, s.id));
+  const cats = CATEGORY_ORDER.filter((c) => visibleShapes.some((s) => s.category === c));
+  for (const s of visibleShapes) if (!cats.includes(s.category)) cats.push(s.category);
 
   const strokeHex = stroke.color;
   const strokeW = stroke.width * scale;
@@ -775,7 +790,7 @@ export function emitManualSvg(
   const shellNorm = shellPts ? shellPts.map(norm) : null;
 
   const o: string[] = [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}">`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${W.toFixed(0)}" height="${H.toFixed(0)}" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}">`,
     `  <title>${esc(title)} - ${esc(project.floor)}</title>`,
   ];
 
@@ -798,15 +813,19 @@ export function emitManualSvg(
   for (const cat of cats) {
     o.push(`    <g id="cat-${cat}">`);
     let n = 0;
-    for (const s of normedShapes) {
+    for (const s of visibleShapes) {
       if (s.category !== cat) continue;
       n += 1;
       const id = `${cat}-${String(n).padStart(2, "0")}`;
-      const area = Math.round(shoelaceArea(s.npoints));
-      const dd = d(s.npoints);
+      const verts = shapeVerts(s).map((v) => normVert(v, norm));
+      const flat = flattenPolyVerts(verts);
+      const area = Math.round(shoelaceArea(flat.length >= 3 ? flat : verts.map((v) => v.p)));
+      // Prefer bezier path (matches canvas); fallback to densified polyline
+      const dd = verts.length >= 2 ? pathDFromVerts(verts) : d(flat);
+      const fill = exportFill(s.fill, s.category);
       o.push(
         `      <path id="${id}" data-area="${area}" data-family="${cat}" ` +
-          `fill="${s.fill}" stroke="none" d="${dd}"/>`,
+          `fill="${fill}" stroke="none" d="${dd}"/>`,
       );
       o.push(
         `      <path data-stroke-for="${id}" fill="none" stroke="${strokeHex}" ` +
