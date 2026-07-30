@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from
 import type { Point } from "@/lib/types";
 import {
   bendEdge,
+  bendHitRadius,
   edgeHitRadius,
   flattenPolyVertsOpen,
   getDrawOpacity,
@@ -10,6 +11,7 @@ import {
   insertVertOnEdge,
   nearestEdge,
   pathDFromVerts,
+  pickBendEdge,
   shapeVerts,
   shellVertsOf,
   syncShapeFromVerts,
@@ -275,10 +277,11 @@ export default function ManualCanvas({
     } else if (drawingPolyLike) {
       return;
     } else if (tool === "select" && (e.altKey || altHeld.current)) {
-      // Alt-drag near any edge to bend (prefer selected)
-      const maxDist = edgeHitRadius(view.scale);
+      // Alt-drag near edge / selected point to bend
+      const maxDist = bendHitRadius(view.scale);
       const tryBend = (id: string, verts: PolyVert[]) => {
-        const edge = nearestEdge(c, verts, maxDist);
+        const prefer = id === selectedId ? selectedVertIndex : null;
+        const edge = pickBendEdge(c, verts, maxDist, prefer);
         if (!edge) return false;
         onSelect(id);
         onSelectVert(edge.index);
@@ -579,10 +582,11 @@ export default function ManualCanvas({
     if (tool !== "select" || spaceHeld.current || e.button !== 0) return;
     e.stopPropagation();
 
-    // Alt + drag on fill/edge → bend nearest edge instead of moving whole shape
+    // Alt + drag on fill/edge → bend (prefer outgoing from selected point)
     if (e.altKey || altHeld.current) {
       const c = toContent(e.clientX, e.clientY);
-      const edge = nearestEdge(c, verts, edgeHitRadius(view.scale));
+      const prefer = id === selectedId ? selectedVertIndex : null;
+      const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer);
       if (edge) {
         onSelect(id);
         onSelectVert(edge.index);

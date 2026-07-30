@@ -214,6 +214,56 @@ export function edgeHitRadius(viewScale: number): number {
   return Math.max(8, 28 / Math.max(0.05, viewScale));
 }
 
+/** Tighter radius for Alt-bend so far edges don't steal the hit. */
+export function bendHitRadius(viewScale: number): number {
+  return Math.max(6, 18 / Math.max(0.05, viewScale));
+}
+
+/**
+ * Pick which edge to bend on Alt-drag.
+ * Prefer outgoing edge from selected vertex when pointer is near that vertex;
+ * otherwise nearest edge with mid-segment preference.
+ */
+export function pickBendEdge(
+  p: Point,
+  verts: PolyVert[],
+  maxDist: number,
+  preferVertIndex: number | null,
+): { index: number; q: Point; dist: number } | null {
+  if (verts.length < 2) return null;
+
+  if (
+    preferVertIndex != null &&
+    preferVertIndex >= 0 &&
+    preferVertIndex < verts.length
+  ) {
+    const vp = verts[preferVertIndex].p;
+    const dx = p[0] - vp[0];
+    const dy = p[1] - vp[1];
+    if (dx * dx + dy * dy <= maxDist * maxDist * 2.25) {
+      // 1.5× maxDist — still near the selected anchor
+      const next = verts[(preferVertIndex + 1) % verts.length].p;
+      const { q, dist2 } = distToSegment(p, vp, next);
+      return { index: preferVertIndex, q, dist: Math.sqrt(dist2) };
+    }
+  }
+
+  const max2 = maxDist * maxDist;
+  let best: { index: number; q: Point; dist: number; score: number } | null = null;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i].p;
+    const b = verts[(i + 1) % verts.length].p;
+    const { dist2, t, q } = distToSegment(p, a, b);
+    if (dist2 > max2) continue;
+    const endBias = t < 0.12 || t > 0.88 ? maxDist * 0.55 : 0;
+    const score = Math.sqrt(dist2) + endBias;
+    if (!best || score < best.score) {
+      best = { index: i, q, dist: Math.sqrt(dist2), score };
+    }
+  }
+  return best ? { index: best.index, q: best.q, dist: best.dist } : null;
+}
+
 /** Draft helpers below — cubic sampling for sync/export. */
 
 function lerpPt(a: Point, b: Point, t: number): Point {
