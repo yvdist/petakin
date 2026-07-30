@@ -14,3 +14,6 @@ frontend/out/
 # outputs
 *.svg.png
 out_*.svg
+
+# etc
+.hiddendocs
