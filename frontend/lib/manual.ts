@@ -4,7 +4,7 @@
 import type { Category, Geometry, Point } from "./types";
 import { AEON_CONFIG } from "./presets";
 
-export type ShapeKind = "rect" | "poly";
+export type ShapeKind = "rect" | "poly" | "ellipse";
 
 /** Synthetic id for the outer shell when selected in the canvas. */
 export const SHELL_ID = "__shell__";
@@ -121,6 +121,26 @@ export function shellVertsOf(project: ManualProject): PolyVert[] | null {
 
 export function syncShapeFromVerts(verts: PolyVert[]): { verts: PolyVert[]; points: Point[] } {
   return { verts, points: flattenPolyVerts(verts) };
+}
+
+/** Approximate an axis-aligned ellipse from bounding-box corners (a,b). */
+export function ellipseVertsFromBox(a: Point, b: Point, segments = 48): PolyVert[] {
+  const x0 = Math.min(a[0], b[0]);
+  const y0 = Math.min(a[1], b[1]);
+  const x1 = Math.max(a[0], b[0]);
+  const y1 = Math.max(a[1], b[1]);
+  const cx = (x0 + x1) / 2;
+  const cy = (y0 + y1) / 2;
+  const rx = (x1 - x0) / 2;
+  const ry = (y1 - y0) / 2;
+  if (rx < 0.5 || ry < 0.5) return [];
+  const n = Math.max(8, Math.round(segments));
+  const verts: PolyVert[] = [];
+  for (let i = 0; i < n; i++) {
+    const t = (i / n) * Math.PI * 2;
+    verts.push({ p: [cx + rx * Math.cos(t), cy + ry * Math.sin(t)] });
+  }
+  return verts;
 }
 
 export function pathDFromVerts(verts: PolyVert[]): string {

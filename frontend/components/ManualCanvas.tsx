@@ -5,6 +5,7 @@ import {
   bendEdge,
   bendHitRadius,
   edgeHitRadius,
+  ellipseVertsFromBox,
   flattenPolyVertsOpen,
   getDrawOpacity,
   getStroke,
@@ -26,7 +27,7 @@ const BRAND = "#0D9488";
 const BRAND_SOFT = "#0D948822";
 const DRAG_THRESH_PX = 4;
 
-export type Tool = "select" | "rect" | "poly" | "outline";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "outline";
 
 interface Props {
   project: ManualProject;
@@ -53,7 +54,7 @@ type PolyDraft = {
 };
 
 type DragState = {
-  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "bend" | "rect" | "polyPlace";
+  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "bend" | "rect" | "ellipse" | "polyPlace";
   startClient: { x: number; y: number };
   startContent: Point;
   origVerts: PolyVert[];
@@ -263,10 +264,10 @@ export default function ManualCanvas({
     if (e.button === 1 || spaceHeld.current) return beginPan(e);
     if (e.button === 2) return;
     const c = toContent(e.clientX, e.clientY);
-    if (tool === "rect") {
+    if (tool === "rect" || tool === "ellipse") {
       const a = snapPoint(c);
       drag.current = {
-        mode: "rect",
+        mode: tool,
         startClient: { x: e.clientX, y: e.clientY },
         startContent: a,
         origVerts: [],
@@ -348,9 +349,17 @@ export default function ManualCanvas({
       dstate.startClient = { x: e.clientX, y: e.clientY };
       const [dx, dy] = clientToSvgDelta(dxC, dyC);
       setView((v) => ({ ...v, tx: v.tx + dx, ty: v.ty + dy }));
-    } else if (dstate.mode === "rect") {
+    } else if (dstate.mode === "rect" || dstate.mode === "ellipse") {
       let b = toContent(e.clientX, e.clientY);
       b = snapPoint(b);
+      if (shiftHeld.current) {
+        // square / circle from corner a
+        const a = dstate.startContent;
+        const dx = b[0] - a[0];
+        const dy = b[1] - a[1];
+        const s = Math.max(Math.abs(dx), Math.abs(dy));
+        b = [a[0] + Math.sign(dx || 1) * s, a[1] + Math.sign(dy || 1) * s];
+      }
       setRectDraft({ a: dstate.startContent, b });
     } else if (dstate.mode === "polyPlace") {
       let h = toContent(e.clientX, e.clientY);
@@ -406,24 +415,32 @@ export default function ManualCanvas({
       commitPolyPlace(dstate.startContent, dstate.handleOut, dist);
       return;
     }
-    if (dstate.mode === "rect" && rectDraft) {
+    if ((dstate.mode === "rect" || dstate.mode === "ellipse") && rectDraft) {
       const { a, b } = rectDraft;
       setRectDraft(null);
       const w = Math.abs(b[0] - a[0]);
       const h = Math.abs(b[1] - a[1]);
       if (w > 2 && h > 2) {
-        const x0 = Math.min(a[0], b[0]);
-        const y0 = Math.min(a[1], b[1]);
-        const x1 = Math.max(a[0], b[0]);
-        const y1 = Math.max(a[1], b[1]);
-        const corners: Point[] = [
-          [x0, y0],
-          [x1, y0],
-          [x1, y1],
-          [x0, y1],
-        ];
-        const verts = corners.map((p) => ({ p }));
-        onAddShape(makeShape("rect", corners, verts));
+        if (dstate.mode === "ellipse") {
+          const verts = ellipseVertsFromBox(a, b);
+          if (verts.length >= 3) {
+            const synced = syncShapeFromVerts(verts);
+            onAddShape(makeShape("ellipse", synced.points, synced.verts));
+          }
+        } else {
+          const x0 = Math.min(a[0], b[0]);
+          const y0 = Math.min(a[1], b[1]);
+          const x1 = Math.max(a[0], b[0]);
+          const y1 = Math.max(a[1], b[1]);
+          const corners: Point[] = [
+            [x0, y0],
+            [x1, y0],
+            [x1, y1],
+            [x0, y1],
+          ];
+          const verts = corners.map((p) => ({ p }));
+          onAddShape(makeShape("rect", corners, verts));
+        }
       }
     } else if (
       dstate.mode === "move" ||
@@ -837,18 +854,27 @@ export default function ManualCanvas({
               </g>
             ))}
 
-          {rectDraft && (
-            <rect
-              x={Math.min(rectDraft.a[0], rectDraft.b[0])}
-              y={Math.min(rectDraft.a[1], rectDraft.b[1])}
-              width={Math.abs(rectDraft.b[0] - rectDraft.a[0])}
-              height={Math.abs(rectDraft.b[1] - rectDraft.a[1])}
-              fill={BRAND_SOFT}
-              stroke={BRAND}
-              strokeWidth={uiSw}
-              pointerEvents="none"
-            />
-          )}
+          {rectDraft &&
+            (drag.current?.mode === "ellipse" || tool === "ellipse" ? (
+              <path
+                d={pathDFromVerts(ellipseVertsFromBox(rectDraft.a, rectDraft.b))}
+                fill={BRAND_SOFT}
+                stroke={BRAND}
+                strokeWidth={uiSw}
+                pointerEvents="none"
+              />
+            ) : (
+              <rect
+                x={Math.min(rectDraft.a[0], rectDraft.b[0])}
+                y={Math.min(rectDraft.a[1], rectDraft.b[1])}
+                width={Math.abs(rectDraft.b[0] - rectDraft.a[0])}
+                height={Math.abs(rectDraft.b[1] - rectDraft.a[1])}
+                fill={BRAND_SOFT}
+                stroke={BRAND}
+                strokeWidth={uiSw}
+                pointerEvents="none"
+              />
+            ))}
 
           {(poly || placing) && (
             <g pointerEvents="none" opacity={draftPaused ? 0.55 : 1}>

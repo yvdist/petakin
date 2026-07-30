@@ -51,6 +51,43 @@ function Section({ title, children, right }: { title: string; children: React.Re
   );
 }
 
+function ToolIcon({ name }: { name: Tool }) {
+  const common = { width: 16, height: 16, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 2, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  switch (name) {
+    case "select":
+      return (
+        <svg {...common} aria-hidden>
+          <path d="M4 4l7 16 2.5-6.5L20 11z" />
+        </svg>
+      );
+    case "outline":
+      return (
+        <svg {...common} aria-hidden>
+          <path d="M4 8h16M4 16h16M8 4v16M16 4v16" opacity={0.35} />
+          <rect x="5" y="5" width="14" height="14" rx="1" />
+        </svg>
+      );
+    case "rect":
+      return (
+        <svg {...common} aria-hidden>
+          <rect x="4" y="6" width="16" height="12" rx="1" />
+        </svg>
+      );
+    case "ellipse":
+      return (
+        <svg {...common} aria-hidden>
+          <ellipse cx="12" cy="12" rx="9" ry="6" />
+        </svg>
+      );
+    case "poly":
+      return (
+        <svg {...common} aria-hidden>
+          <path d="M12 3l8 6.5-3 9.5H7L4 9.5z" />
+        </svg>
+      );
+  }
+}
+
 function readImage(file: File): Promise<{ dataUrl: string; width: number; height: number }> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -474,6 +511,7 @@ export default function ManualPage() {
       }
       if (e.key === "v" || e.key === "V") setTool("select");
       else if (e.key === "r" || e.key === "R") setTool("rect");
+      else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
       else if (e.key === "o" || e.key === "O") setTool("outline");
       else if (e.key === "Delete" || e.key === "Backspace") {
@@ -511,6 +549,7 @@ export default function ManualPage() {
     { key: "select", label: "Select", hint: "V" },
     { key: "outline", label: "Outline", hint: "O" },
     { key: "rect", label: "Rect", hint: "R" },
+    { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
   ];
 
@@ -549,16 +588,21 @@ export default function ManualPage() {
           </Section>
 
           <Section title="Tools">
-            <div className="mb-3 flex gap-1">
+            <div className="mb-3 grid grid-cols-3 gap-1">
               {TOOLS.map((t) => (
                 <button
                   key={t.key}
+                  type="button"
                   onClick={() => setTool(t.key)}
-                  className={`flex-1 rounded px-2 py-1.5 text-sm ${
+                  className={`flex flex-col items-center gap-0.5 rounded px-1.5 py-1.5 text-[11px] leading-tight ${
                     tool === t.key ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
                   }`}
+                  title={`${t.label} (${t.hint})`}
                 >
-                  {t.label} <span className="opacity-60">{t.hint}</span>
+                  <ToolIcon name={t.key} />
+                  <span>
+                    {t.label} <span className="opacity-60">{t.hint}</span>
+                  </span>
                 </button>
               ))}
             </div>
@@ -839,7 +883,8 @@ export default function ManualPage() {
             </label>
             <div className="flex-1" />
             <span className="text-xs text-neutral-500">
-              {tool === "rect" && "Drag to draw a box"}
+              {tool === "rect" && "Drag to draw a box · Shift = square"}
+              {tool === "ellipse" && "Drag to draw oval · Shift = circle"}
               {tool === "poly" &&
                 "Click = corner · drag = curve · exact cursor · Space = pan"}
               {tool === "outline" &&
