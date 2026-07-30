@@ -14,6 +14,7 @@ import {
   DEFAULT_STROKE,
   defaultFill,
   emitManualSvg,
+  getDrawOpacity,
   getStroke,
   loadProject,
   newProject,
@@ -245,6 +246,7 @@ export default function ManualPage() {
   }, [selectedId]);
 
   const setOpacity = (v: number) => setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: v } } : p));
+  const setDrawOpacity = (v: number) => setProject((p) => (p ? { ...p, drawOpacity: v } : p));
   const stroke = getStroke(project);
   const setStrokeColor = (color: string) =>
     setProject((p) => (p ? { ...p, stroke: { ...getStroke(p), color } } : p));
@@ -584,6 +586,19 @@ export default function ManualPage() {
                 onChange={(e) => setOpacity(Number(e.target.value))}
                 className="w-28 accent-brand"
                 disabled={!hasImage}
+              />
+            </label>
+            <label className="flex items-center gap-1.5">
+              Draw
+              <input
+                type="range"
+                min={0.05}
+                max={1}
+                step={0.05}
+                value={getDrawOpacity(project)}
+                onChange={(e) => setDrawOpacity(Number(e.target.value))}
+                className="w-28 accent-brand"
+                disabled={!project}
               />
             </label>
             <div className="flex-1" />

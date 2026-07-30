@@ -40,10 +40,13 @@ export interface ManualProject {
   shellVerts?: PolyVert[] | null;
   /** Stroke for tenant rect/poly (default white). */
   stroke?: ManualStroke;
+  /** Editor-only opacity for drawn shapes/shell (0.05–1). Export stays full. */
+  drawOpacity?: number;
   updatedAt: number;
 }
 
 export const DEFAULT_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
+export const DEFAULT_DRAW_OPACITY = 1;
 
 export function getStroke(project: ManualProject | null | undefined): ManualStroke {
   const s = project?.stroke;
@@ -52,6 +55,12 @@ export function getStroke(project: ManualProject | null | undefined): ManualStro
     color: typeof s.color === "string" && s.color ? s.color : DEFAULT_STROKE.color,
     width: Math.max(1, Math.min(12, Number(s.width) || DEFAULT_STROKE.width)),
   };
+}
+
+export function getDrawOpacity(project: ManualProject | null | undefined): number {
+  const v = project?.drawOpacity;
+  if (typeof v !== "number" || Number.isNaN(v)) return DEFAULT_DRAW_OPACITY;
+  return Math.max(0.05, Math.min(1, v));
 }
 
 // Categories a user can actually draw with (ignore is auto-only).
@@ -464,6 +473,7 @@ export function newProject(floor: string): ManualProject {
     shell: null,
     shellVerts: null,
     stroke: { ...DEFAULT_STROKE },
+    drawOpacity: DEFAULT_DRAW_OPACITY,
     updatedAt: Date.now(),
   };
 }
