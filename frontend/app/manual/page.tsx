@@ -1063,7 +1063,7 @@ export default function ManualPage() {
                       <button
                         type="button"
                         onClick={() => setLayersOpen(false)}
-                        className="rounded px-1.5 py-0.5 text-xs text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
+                        className="rounded px-1.5 py-0.5 text-2xl text-neutral-500 hover:bg-neutral-200 hover:text-neutral-800"
                         title="Collapse"
                       >
                         ▾
