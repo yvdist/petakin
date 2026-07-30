@@ -11,13 +11,16 @@ import { download, svgToPngBlob } from "@/lib/geometry";
 import {
   CATEGORY_COLORS,
   DRAW_CATEGORIES,
+  DEFAULT_STROKE,
   defaultFill,
   emitManualSvg,
+  getStroke,
   loadProject,
   newProject,
   newShapeId,
   saveProject,
   seedFromGeometry,
+  SHELL_ID,
   type ManualProject,
   type ManualShape,
   type ShapeKind,
@@ -143,12 +146,27 @@ export default function ManualPage() {
   }, []);
 
   const deleteSelected = useCallback(() => {
+    if (selectedId === SHELL_ID) {
+      setProject((p) => (p ? { ...p, shell: null } : p));
+      setSelectedId(null);
+      return;
+    }
     setProject((p) => (p && selectedId ? { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) } : p));
     setSelectedId(null);
   }, [selectedId]);
 
+  const setShell = useCallback((points: Point[]) => {
+    setProject((p) => (p ? { ...p, shell: points } : p));
+    setTool("select");
+  }, []);
+
+  const clearShell = useCallback(() => {
+    setProject((p) => (p ? { ...p, shell: null } : p));
+    if (selectedId === SHELL_ID) setSelectedId(null);
+  }, [selectedId]);
+
   const duplicateSelected = useCallback(() => {
-    if (!selectedId) return;
+    if (!selectedId || selectedId === SHELL_ID) return;
     setProject((p) => {
       if (!p) return p;
       const src = p.shapes.find((s) => s.id === selectedId);
@@ -164,6 +182,11 @@ export default function ManualPage() {
   }, [selectedId]);
 
   const setOpacity = (v: number) => setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: v } } : p));
+  const stroke = getStroke(project);
+  const setStrokeColor = (color: string) =>
+    setProject((p) => (p ? { ...p, stroke: { ...getStroke(p), color } } : p));
+  const setStrokeWidth = (width: number) =>
+    setProject((p) => (p ? { ...p, stroke: { ...getStroke(p), width } } : p));
 
   // ---- export ----
   const doExportSvg = () => {
@@ -219,6 +242,7 @@ export default function ManualPage() {
       if (e.key === "v" || e.key === "V") setTool("select");
       else if (e.key === "r" || e.key === "R") setTool("rect");
       else if (e.key === "p" || e.key === "P") setTool("poly");
+      else if (e.key === "o" || e.key === "O") setTool("outline");
       else if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
       else if (e.key === "[") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) } } : p));
       else if (e.key === "]") setProject((p) => (p ? { ...p, bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) } } : p));
@@ -228,15 +252,21 @@ export default function ManualPage() {
   }, [deleteSelected, duplicateSelected]);
 
   const selShape = useMemo(
-    () => (selectedId && project ? project.shapes.find((s) => s.id === selectedId) ?? null : null),
+    () =>
+      selectedId && selectedId !== SHELL_ID && project
+        ? project.shapes.find((s) => s.id === selectedId) ?? null
+        : null,
     [selectedId, project],
   );
+  const shellSelected = selectedId === SHELL_ID;
   const hasImage = !!project?.bg.dataUrl;
+  const shellPts = project?.shell && project.shell.length >= 3 ? project.shell : null;
 
   const TOOLS: { key: Tool; label: string; hint: string }[] = [
     { key: "select", label: "Select", hint: "V" },
-    { key: "rect", label: "Rectangle", hint: "R" },
-    { key: "poly", label: "Polygon", hint: "P" },
+    { key: "outline", label: "Outline", hint: "O" },
+    { key: "rect", label: "Rect", hint: "R" },
+    { key: "poly", label: "Poly", hint: "P" },
   ];
 
   return (
@@ -318,7 +348,80 @@ export default function ManualPage() {
               />
               px
             </label>
+            <div className="mt-3 border-t border-neutral-100 pt-3">
+              <div className="mb-2 text-xs font-medium text-neutral-600">Tenant stroke</div>
+              <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                Color
+                <input
+                  type="color"
+                  value={stroke.color}
+                  onChange={(e) => setStrokeColor(e.target.value)}
+                  className="h-6 w-10 rounded border border-neutral-300"
+                />
+              </label>
+              <label className="flex items-center gap-2 text-xs text-neutral-700">
+                Width
+                <input
+                  type="range"
+                  min={1}
+                  max={12}
+                  step={1}
+                  value={stroke.width}
+                  onChange={(e) => setStrokeWidth(Number(e.target.value))}
+                  className="w-24 accent-brand"
+                />
+                <span className="w-6 font-mono">{stroke.width}</span>
+                px
+              </label>
+              <button
+                type="button"
+                className="mt-1 text-[11px] text-neutral-500 hover:underline"
+                onClick={() => {
+                  setStrokeColor(DEFAULT_STROKE.color);
+                  setStrokeWidth(DEFAULT_STROKE.width);
+                }}
+              >
+                Reset to white / 2px
+              </button>
+            </div>
+            <div className="mt-3 border-t border-neutral-100 pt-3 text-xs text-neutral-600">
+              <div className="mb-1 font-medium text-neutral-600">Outer outline (shell)</div>
+              <div className="mb-2 text-neutral-500">
+                {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — use Outline tool"}
+              </div>
+              <div className="flex gap-2">
+                {shellPts && (
+                  <button
+                    onClick={() => {
+                      setSelectedId(SHELL_ID);
+                      setTool("select");
+                    }}
+                    className={`rounded px-2 py-1 text-xs ${shellSelected ? "bg-brand text-white" : "bg-neutral-200"}`}
+                  >
+                    Select shell
+                  </button>
+                )}
+                <button
+                  onClick={clearShell}
+                  disabled={!shellPts}
+                  className="rounded bg-neutral-200 px-2 py-1 text-xs disabled:opacity-40"
+                >
+                  Clear shell
+                </button>
+              </div>
+            </div>
           </Section>
+
+          {shellSelected && (
+            <Section title="Shell">
+              <p className="mb-2 text-xs text-neutral-600">
+                Outer floor-plate outline. Units outside this boundary are clipped.
+              </p>
+              <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
+                Delete shell ⌫
+              </button>
+            </Section>
+          )}
 
           {selShape && (
             <Section title="Shape" right={<span className="text-xs text-neutral-400">{selShape.kind}</span>}>
@@ -403,6 +506,7 @@ export default function ManualPage() {
             <span className="text-xs text-neutral-500">
               {tool === "rect" && "Drag to draw a box"}
               {tool === "poly" && "Click to add points · double-click / Enter to close"}
+              {tool === "outline" && "Trace outer boundary · double-click / Enter to close"}
               {tool === "select" && "Click to select · drag to move · drag handles to edit"}
             </span>
           </div>
@@ -419,6 +523,7 @@ export default function ManualPage() {
                 onSelect={setSelectedId}
                 onAddShape={addShape}
                 onUpdateShape={updateShapePoints}
+                onSetShell={setShell}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-neutral-400">

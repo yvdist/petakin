@@ -6,6 +6,9 @@ import { AEON_CONFIG } from "./presets";
 
 export type ShapeKind = "rect" | "poly";
 
+/** Synthetic id for the outer shell when selected in the canvas. */
+export const SHELL_ID = "__shell__";
+
 export interface ManualShape {
   id: string;
   kind: ShapeKind;
@@ -15,12 +18,33 @@ export interface ManualShape {
   name?: string;
 }
 
+/** Tenant block stroke (white separators between units). */
+export interface ManualStroke {
+  color: string;
+  width: number; // image-pixel space
+}
+
 export interface ManualProject {
   version: 1;
   floor: string;
   bg: { dataUrl: string; width: number; height: number; opacity: number };
   shapes: ManualShape[];
+  /** Outer floor-plate polygon — clips units (optional). */
+  shell?: Point[] | null;
+  /** Stroke for tenant rect/poly (default white). */
+  stroke?: ManualStroke;
   updatedAt: number;
+}
+
+export const DEFAULT_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
+
+export function getStroke(project: ManualProject | null | undefined): ManualStroke {
+  const s = project?.stroke;
+  if (!s) return { ...DEFAULT_STROKE };
+  return {
+    color: typeof s.color === "string" && s.color ? s.color : DEFAULT_STROKE.color,
+    width: Math.max(1, Math.min(12, Number(s.width) || DEFAULT_STROKE.width)),
+  };
 }
 
 // Categories a user can actually draw with (ignore is auto-only).
@@ -78,7 +102,7 @@ function shoelaceArea(ring: Point[]): number {
   return Math.abs(a) / 2;
 }
 
-// ---- export: normalize + emit spec-exact grouped SVG (port of svg.py) ----
+// ---- export: normalize + emit grouped SVG ----
 
 function esc(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -96,22 +120,25 @@ export function emitManualSvg(
   const pad = cfg.pad;
   const gutter = cfg.gutter;
   const targetW = cfg.normalizedWidth;
-  const sw = cfg.strokeWidth;
+  const stroke = getStroke(project);
   const badge = cfg.badge;
+  const shellPts = project.shell && project.shell.length >= 3 ? project.shell : null;
 
-  // bbox over all shape points (fall back to bg dims when empty)
+  // bbox over shell + shapes (fall back to bg dims when empty)
   let x0 = Infinity,
     y0 = Infinity,
     x1 = -Infinity,
     y1 = -Infinity;
-  for (const s of project.shapes) {
-    for (const [x, y] of s.points) {
+  const consider = (pts: Point[]) => {
+    for (const [x, y] of pts) {
       if (x < x0) x0 = x;
       if (y < y0) y0 = y;
       if (x > x1) x1 = x;
       if (y > y1) y1 = y;
     }
-  }
+  };
+  if (shellPts) consider(shellPts);
+  for (const s of project.shapes) consider(s.points);
   if (!isFinite(x0)) {
     x0 = 0;
     y0 = 0;
@@ -129,16 +156,36 @@ export function emitManualSvg(
   const bcx = planWidth + gutter / 2;
   const bcy = 150;
 
-  // build units grouped by category, per-category zero-padded counter
   const normedShapes = project.shapes.map((s) => ({ ...s, npoints: s.points.map(norm) }));
   const cats = CATEGORY_ORDER.filter((c) => normedShapes.some((s) => s.category === c));
   for (const s of normedShapes) if (!cats.includes(s.category)) cats.push(s.category);
 
+  const strokeHex = stroke.color;
+  const strokeW = stroke.width * scale;
+  const shellStrokeW = Math.max(strokeW * 1.5, 2 * scale);
+  const shellNorm = shellPts ? shellPts.map(norm) : null;
+
   const o: string[] = [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${W.toFixed(0)} ${H.toFixed(0)}">`,
     `  <title>${esc(title)} - ${esc(project.floor)}</title>`,
-    `  <g id="units" stroke="#FFFFFF" stroke-width="${sw}" stroke-linejoin="round" stroke-linecap="round">`,
   ];
+
+  if (shellNorm) {
+    o.push(`  <defs>`);
+    o.push(`    <clipPath id="shell">`);
+    o.push(`      <path d="${d(shellNorm)}"/>`);
+    o.push(`    </clipPath>`);
+    o.push(`  </defs>`);
+    o.push(`  <g id="shell">`);
+    o.push(
+      `    <path fill="${cfg.shellFill}" stroke="#000000" stroke-width="${shellStrokeW.toFixed(2)}" ` +
+        `stroke-linejoin="miter" stroke-linecap="round" d="${d(shellNorm)}"/>`,
+    );
+    o.push(`  </g>`);
+  }
+
+  const clipAttr = shellNorm ? ` clip-path="url(#shell)"` : "";
+  o.push(`  <g id="units"${clipAttr}>`);
   for (const cat of cats) {
     o.push(`    <g id="cat-${cat}">`);
     let n = 0;
@@ -147,9 +194,15 @@ export function emitManualSvg(
       n += 1;
       const id = `${cat}-${String(n).padStart(2, "0")}`;
       const area = Math.round(shoelaceArea(s.npoints));
+      const dd = d(s.npoints);
       o.push(
         `      <path id="${id}" data-area="${area}" data-family="${cat}" ` +
-          `fill="${s.fill}" d="${d(s.npoints)}"/>`,
+          `fill="${s.fill}" stroke="none" d="${dd}"/>`,
+      );
+      o.push(
+        `      <path data-stroke-for="${id}" fill="none" stroke="${strokeHex}" ` +
+          `stroke-width="${strokeW.toFixed(2)}" stroke-linejoin="round" ` +
+          `stroke-linecap="round" d="${dd}"/>`,
       );
     }
     o.push(`    </g>`);
@@ -173,8 +226,6 @@ export function emitManualSvg(
 }
 
 // ---- seed from the auto pipeline: geometry.units -> editable shapes ----
-// Auto geometry is in normalized coords; invert geo.transform back to source
-// image pixels so seeded shapes line up with the uploaded underlay.
 export function seedFromGeometry(geo: Geometry): ManualShape[] {
   const t = geo.transform;
   const toSrc = (p: Point): Point => [(p[0] - t.pad) / t.scale + t.x0, (p[1] - t.pad) / t.scale + t.y0];
@@ -193,6 +244,14 @@ export function seedFromGeometry(geo: Geometry): ManualShape[] {
   });
 }
 
+/** Optional: invert auto shell into manual shell points (source image space). */
+export function shellFromGeometry(geo: Geometry): Point[] | null {
+  const ring = geo.shell?.[0]?.points;
+  if (!ring || ring.length < 3) return null;
+  const t = geo.transform;
+  return ring.map(([x, y]) => [(x - t.pad) / t.scale + t.x0, (y - t.pad) / t.scale + t.y0] as Point);
+}
+
 // ---- localStorage store (single active project) ----
 
 const KEY = "petakin.manual.v1";
@@ -203,6 +262,8 @@ export function newProject(floor: string): ManualProject {
     floor,
     bg: { dataUrl: "", width: 0, height: 0, opacity: 0.4 },
     shapes: [],
+    shell: null,
+    stroke: { ...DEFAULT_STROKE },
     updatedAt: Date.now(),
   };
 }
@@ -218,8 +279,6 @@ export function loadProject(): ManualProject | null {
   }
 }
 
-// Persist project. bg dataURL can blow the ~5MB quota; on failure retry without
-// it so shapes still survive a refresh (underlay just needs re-uploading).
 export function saveProject(project: ManualProject): { ok: boolean; bgDropped: boolean } {
   if (typeof window === "undefined") return { ok: false, bgDropped: false };
   const withTs = { ...project, updatedAt: Date.now() };
