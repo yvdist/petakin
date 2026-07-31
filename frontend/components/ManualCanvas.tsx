@@ -4,9 +4,11 @@ import type { Point } from "@/lib/types";
 import {
   bendEdge,
   bendHitRadius,
+  computeExportLayout,
   defaultFill,
   edgeHitRadius,
   ellipseVertsFromBox,
+  exportToSource,
   flattenPolyVertsOpen,
   getDrawOpacity,
   getStroke,
@@ -19,19 +21,23 @@ import {
   pickBendEdge,
   shapeVerts,
   shellVertsOf,
+  sourceToExport,
   syncShapeFromVerts,
   SHELL_ID,
+  type ManualBadgeLayout,
   type ManualProject,
   type ManualShape,
   type PolyVert,
   type ShapeKind,
 } from "@/lib/manual";
+import { AEON_CONFIG } from "@/lib/presets";
 
 const BRAND = "#0D9488";
 const BRAND_SOFT = "#0D948822";
 const DRAG_THRESH_PX = 4;
+const BADGE_STROKE = AEON_CONFIG.badge.stroke;
 
-export type Tool = "select" | "rect" | "ellipse" | "poly" | "outline";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "outline" | "badge";
 
 interface Props {
   project: ManualProject;
@@ -47,6 +53,7 @@ interface Props {
   onUpdateShapeVerts: (id: string, verts: PolyVert[]) => void;
   onSetShell: (verts: PolyVert[]) => void;
   onRequestTool?: (tool: Tool) => void;
+  onUpdateBadgeLayout?: (layout: ManualBadgeLayout) => void;
 }
 
 type View = { scale: number; tx: number; ty: number };
@@ -58,12 +65,25 @@ type PolyDraft = {
 };
 
 type DragState = {
-  mode: "none" | "pan" | "move" | "vertex" | "bezier" | "bend" | "rect" | "ellipse" | "polyPlace";
+  mode:
+    | "none"
+    | "pan"
+    | "move"
+    | "vertex"
+    | "bezier"
+    | "bend"
+    | "rect"
+    | "ellipse"
+    | "polyPlace"
+    | "badgeMove"
+    | "badgeResize";
   startClient: { x: number; y: number };
   startContent: Point;
   origVerts: PolyVert[];
   vIdx: number;
   handleOut?: Point;
+  /** Snapshot of badge layout at drag start (export space). */
+  origBadge?: ManualBadgeLayout;
 };
 
 function cloneVerts(verts: PolyVert[]): PolyVert[] {
@@ -96,11 +116,18 @@ export default function ManualCanvas({
   onUpdateShapeVerts,
   onSetShell,
   onRequestTool,
+  onUpdateBadgeLayout,
 }: Props) {
   const { bg, shapes } = project;
   const shellV = shellVertsOf(project);
   const tenantStroke = getStroke(project);
   const drawOpacity = getDrawOpacity(project);
+  const exportLayout = computeExportLayout(project);
+  const badge = exportLayout.badge;
+  const [badgeSrcCx, badgeSrcCy] = exportToSource(exportLayout, [badge.cx, badge.cy]);
+  const badgeSrcR = badge.r / exportLayout.scale;
+  const badgeFontSrc = badge.fontSize / exportLayout.scale;
+  const badgeStrokeSrc = badge.strokeWidth / exportLayout.scale;
   const paintOrder = orderedShapeIds(project)
     .map((id) => shapes.find((s) => s.id === id))
     .filter((s): s is ManualShape => !!s && isShapeVisible(project, s.id));
@@ -270,6 +297,7 @@ export default function ManualCanvas({
   const onBgMouseDown = (e: MouseEvent) => {
     if (e.button === 1 || spaceHeld.current) return beginPan(e);
     if (e.button === 2) return;
+    if (tool === "badge") return beginPan(e);
     const c = toContent(e.clientX, e.clientY);
     if (tool === "rect" || tool === "ellipse") {
       const a = snapPoint(c);
@@ -410,6 +438,29 @@ export default function ManualCanvas({
       let h = toContent(e.clientX, e.clientY);
       if (!precise) h = snapPoint(h, selectedId);
       setLiveEdit({ id: selectedId, verts: bendEdge(dstate.origVerts, dstate.vIdx, h) });
+    } else if ((dstate.mode === "badgeMove" || dstate.mode === "badgeResize") && dstate.origBadge && onUpdateBadgeLayout) {
+      const cur = toContent(e.clientX, e.clientY);
+      const layout = computeExportLayout(project);
+      if (dstate.mode === "badgeMove") {
+        const [ex, ey] = sourceToExport(layout, cur);
+        const [sx, sy] = sourceToExport(layout, dstate.startContent);
+        onUpdateBadgeLayout({
+          ...dstate.origBadge,
+          cx: dstate.origBadge.cx + (ex - sx),
+          cy: dstate.origBadge.cy + (ey - sy),
+        });
+      } else {
+        const [cx, cy] = exportToSource(layout, [dstate.origBadge.cx, dstate.origBadge.cy]);
+        const distSrc = Math.hypot(cur[0] - cx, cur[1] - cy);
+        const newR = Math.max(8, distSrc * layout.scale);
+        const ratio = newR / dstate.origBadge.r;
+        onUpdateBadgeLayout({
+          ...dstate.origBadge,
+          r: newR,
+          fontSize: Math.max(8, dstate.origBadge.fontSize * ratio),
+          strokeWidth: Math.max(1, dstate.origBadge.strokeWidth * ratio),
+        });
+      }
     }
   };
 
@@ -663,9 +714,36 @@ export default function ManualCanvas({
       : null;
 
   const cursorClass =
-    tool === "select" ? "cursor-default active:cursor-grabbing" : "cursor-crosshair";
+    tool === "select" || tool === "badge"
+      ? "cursor-default active:cursor-grabbing"
+      : "cursor-crosshair";
 
   const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
+
+  // Expand viewBox so the floor badge (often in the export gutter) stays visible.
+  const vbPad = badgeSrcR + 24;
+  const vbMinX = Math.min(0, badgeSrcCx - vbPad);
+  const vbMinY = Math.min(0, badgeSrcCy - vbPad);
+  const vbMaxX = Math.max(bg.width || 1, badgeSrcCx + vbPad);
+  const vbMaxY = Math.max(bg.height || 1, badgeSrcCy + vbPad);
+  const vbW = Math.max(1, vbMaxX - vbMinX);
+  const vbH = Math.max(1, vbMaxY - vbMinY);
+
+  const startBadgeDrag = (e: MouseEvent, mode: "badgeMove" | "badgeResize") => {
+    if (tool !== "badge" || !onUpdateBadgeLayout) return;
+    e.stopPropagation();
+    e.preventDefault();
+    const c = toContent(e.clientX, e.clientY);
+    drag.current = {
+      mode,
+      startClient: { x: e.clientX, y: e.clientY },
+      startContent: c,
+      origVerts: [],
+      vIdx: -1,
+      origBadge: { ...badge },
+    };
+    moved.current = false;
+  };
   const draftVerts: PolyVert[] = placing
     ? [...(poly?.verts ?? []), { p: placing.p, handleOut: placing.handleOut }]
     : poly?.verts ?? [];
@@ -704,7 +782,7 @@ export default function ManualCanvas({
       <svg
         ref={svgRef}
         className={`h-full w-full ${cursorClass}`}
-        viewBox={`0 0 ${bg.width || 1} ${bg.height || 1}`}
+        viewBox={`${vbMinX} ${vbMinY} ${vbW} ${vbH}`}
         preserveAspectRatio="none"
         onWheel={onWheel}
         onContextMenu={onContextMenu}
@@ -938,8 +1016,55 @@ export default function ManualCanvas({
               )}
             </g>
           )}
+
+          {/* Floor badge preview (export gutter mapped into source space) */}
+          <g
+            opacity={tool === "badge" ? 1 : 0.85}
+            style={{ pointerEvents: tool === "badge" ? "auto" : "none" }}
+            onMouseDown={(e) => startBadgeDrag(e, "badgeMove")}
+            className={tool === "badge" ? "cursor-move" : undefined}
+          >
+            <circle
+              cx={badgeSrcCx}
+              cy={badgeSrcCy}
+              r={badgeSrcR}
+              fill="rgba(255,255,255,0.55)"
+              stroke={BADGE_STROKE}
+              strokeWidth={badgeStrokeSrc}
+            />
+            <text
+              x={badgeSrcCx}
+              y={badgeSrcCy + badgeFontSrc * 0.36}
+              textAnchor="middle"
+              fontFamily="Arial, Helvetica, sans-serif"
+              fontWeight={700}
+              fontSize={badgeFontSrc}
+              fill={BADGE_STROKE}
+              pointerEvents="none"
+            >
+              {project.floor}
+            </text>
+            {tool === "badge" && (
+              <circle
+                cx={badgeSrcCx + badgeSrcR}
+                cy={badgeSrcCy}
+                r={Math.max(6 / view.scale, badgeSrcR * 0.12)}
+                fill="#fff"
+                stroke={BADGE_STROKE}
+                strokeWidth={Math.max(1.5 / view.scale, badgeStrokeSrc * 0.5)}
+                className="cursor-nwse-resize"
+                onMouseDown={(e) => startBadgeDrag(e, "badgeResize")}
+              />
+            )}
+          </g>
         </g>
       </svg>
+
+      {tool === "badge" && (
+        <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
+          Floor badge · drag to move · corner handle to resize · Space = pan
+        </div>
+      )}
 
       {drawingPolyLike && (poly || placing) && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">

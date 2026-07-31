@@ -7,20 +7,29 @@ import ManualCanvas, { type Tool } from "@/components/ManualCanvas";
 import type { Category, Point } from "@/lib/types";
 import { CATEGORY_LABEL } from "@/lib/types";
 import { AEON_CONFIG } from "@/lib/presets";
-import { processImage } from "@/lib/api";
 import { download, svgToPngBlob } from "@/lib/geometry";
 import {
   CATEGORY_COLORS,
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
+  DEFAULT_PNG_SCALE,
+  EXPORT_WIDTH_MAX,
+  EXPORT_WIDTH_MIN,
+  PNG_SCALE_MAX,
+  PNG_SCALE_MIN,
   activeProject,
   assignShapeToActiveLayer,
+  computeExportLayout,
   createLayer,
+  defaultBadgeLayout,
   defaultFill,
   deleteLayerNodes,
   emitManualSvg,
+  getBadgeLayout,
   getDrawOpacity,
+  getExportNormalizedWidth,
   getLayerTree,
+  getPngScale,
   getStroke,
   groupSelection,
   isManualProject,
@@ -38,7 +47,6 @@ import {
   removeVert,
   reorderUngrouped,
   saveWorkspace,
-  seedFromGeometry,
   setActiveLayer,
   setAllCollapsed,
   setRootOrder,
@@ -49,6 +57,7 @@ import {
   ungroupedShapeIds,
   SHELL_ID,
   type LayerMoveTarget,
+  type ManualBadgeLayout,
   type ManualProject,
   type ManualShape,
   type ManualWorkspace,
@@ -102,6 +111,23 @@ function ToolIcon({ name }: { name: Tool }) {
           <path d="M12 3l8 6.5-3 9.5H7L4 9.5z" />
         </svg>
       );
+    case "badge":
+      return (
+        <svg {...common} aria-hidden>
+          <circle cx="12" cy="12" r="8" />
+          <text
+            x="12"
+            y="15"
+            textAnchor="middle"
+            fontSize="7"
+            fill="currentColor"
+            stroke="none"
+            fontWeight="700"
+          >
+            1F
+          </text>
+        </svg>
+      );
   }
 }
 
@@ -132,7 +158,6 @@ export default function ManualPage() {
   const [layersOpen, setLayersOpen] = useState(true);
   const [snap, setSnap] = useState(true);
   const [gridSize, setGridSize] = useState(8);
-  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<"idle" | "saving" | "saved">("idle");
   const importRef = useRef<HTMLInputElement>(null);
@@ -293,25 +318,6 @@ export default function ManualPage() {
       setError(String(e));
     }
   }, []);
-
-  const seedFromAuto = useCallback(async () => {
-    if (!file) return;
-    setBusy(true);
-    setError(null);
-    try {
-      const geo = await processImage(file, AEON_CONFIG);
-      const shapes = seedFromGeometry(geo);
-      updateActive((p) => {
-        let next = { ...p, shapes: [...p.shapes, ...shapes] };
-        for (const s of shapes) next = assignShapeToActiveLayer(next, s.id);
-        return next;
-      });
-    } catch (e) {
-      setError("Seed failed (is the backend running?): " + String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [file, updateActive]);
 
   // ---- shape ops ----
   const makeShape = useCallback(
@@ -592,6 +598,21 @@ export default function ManualPage() {
   );
 
   // ---- export ----
+  const exportPreview = useMemo(() => {
+    if (!project) return null;
+    const layout = computeExportLayout(project);
+    const pngScale = getPngScale(project);
+    return {
+      svgW: Math.round(layout.width),
+      svgH: Math.round(layout.height),
+      pngW: Math.round(layout.width * pngScale),
+      pngH: Math.round(layout.height * pngScale),
+      pngScale,
+      planW: getExportNormalizedWidth(project),
+      badge: getBadgeLayout(project),
+    };
+  }, [project]);
+
   const doExportSvg = () => {
     if (!project) return;
     const { svg } = emitManualSvg(project);
@@ -600,8 +621,43 @@ export default function ManualPage() {
   const doExportPng = async () => {
     if (!project) return;
     const { svg, width, height } = emitManualSvg(project);
-    const blob = await svgToPngBlob(svg, width, height, 2);
+    const blob = await svgToPngBlob(svg, width, height, getPngScale(project));
     download(`petakin_${project.floor}.png`, blob);
+  };
+
+  const setExportWidth = (n: number) => {
+    updateActive((p) => ({
+      ...p,
+      exportNormalizedWidth: Math.max(EXPORT_WIDTH_MIN, Math.min(EXPORT_WIDTH_MAX, Math.round(n))),
+    }));
+  };
+
+  const setPngScale = (n: number) => {
+    updateActive((p) => ({
+      ...p,
+      pngScale: Math.max(PNG_SCALE_MIN, Math.min(PNG_SCALE_MAX, Math.round(n))),
+    }));
+  };
+
+  const updateBadgeLayout = useCallback(
+    (layout: ManualBadgeLayout) => {
+      updateActive((p) => ({ ...p, badgeLayout: layout }));
+    },
+    [updateActive],
+  );
+
+  const resetBadgeLayout = () => {
+    updateActive((p) => {
+      const planWidth = getExportNormalizedWidth(p) + 2 * AEON_CONFIG.pad;
+      return { ...p, badgeLayout: defaultBadgeLayout(planWidth, AEON_CONFIG.gutter) };
+    });
+  };
+
+  const patchBadgeField = (key: keyof ManualBadgeLayout, value: number) => {
+    updateActive((p) => {
+      const cur = getBadgeLayout(p);
+      return { ...p, badgeLayout: { ...cur, [key]: value } };
+    });
   };
 
   // ---- project / workspace file ----
@@ -692,6 +748,7 @@ export default function ManualPage() {
       else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
       else if (e.key === "o" || e.key === "O") setTool("outline");
+      else if (e.key === "b" || e.key === "B") setTool("badge");
       else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         if (selectedVertIndex != null) deleteVert();
@@ -729,6 +786,7 @@ export default function ManualPage() {
     { key: "rect", label: "Rect", hint: "R" },
     { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
+    { key: "badge", label: "Badge", hint: "B" },
   ];
 
   return (
@@ -739,7 +797,6 @@ export default function ManualPage() {
           <span className="text-xs text-neutral-400">Manual Mapping</span>
         </div>
         <div className="flex items-center gap-3 text-sm">
-          {busy && <span className="text-brand">Seeding…</span>}
           <span className="text-xs text-neutral-400">
             {saved === "saving" ? "Saving…" : saved === "saved" ? "Autosaved" : ""}
           </span>
@@ -755,14 +812,6 @@ export default function ManualPage() {
         <aside className="w-80 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white">
           <Section title="Input">
             <Uploader floor={project?.floor ?? "1F"} onFloor={setFloor} onFile={onFile} fileName={file?.name} />
-            <button
-              onClick={seedFromAuto}
-              disabled={!file || busy}
-              className="mt-3 w-full rounded bg-neutral-200 px-2 py-1.5 text-sm disabled:opacity-40"
-              title="Run the auto pipeline once and drop its units in as editable shapes"
-            >
-              Seed from auto
-            </button>
           </Section>
 
           <Section title="Tools">
@@ -973,7 +1022,115 @@ export default function ManualPage() {
             </p>
           </Section>
 
+          <Section title="Floor badge">
+            <p className="mb-2 text-[11px] text-neutral-400">
+              Drag on canvas with the Badge tool, or edit numbers here. Preview updates live.
+            </p>
+            <div className="grid grid-cols-2 gap-2 text-xs">
+              <label className="flex flex-col gap-0.5">
+                X
+                <input
+                  type="number"
+                  className="rounded border border-neutral-300 px-1.5 py-1"
+                  value={Math.round(exportPreview?.badge.cx ?? 0)}
+                  disabled={!project}
+                  onChange={(e) => patchBadgeField("cx", Number(e.target.value))}
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                Y
+                <input
+                  type="number"
+                  className="rounded border border-neutral-300 px-1.5 py-1"
+                  value={Math.round(exportPreview?.badge.cy ?? 0)}
+                  disabled={!project}
+                  onChange={(e) => patchBadgeField("cy", Number(e.target.value))}
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                Radius
+                <input
+                  type="number"
+                  min={8}
+                  className="rounded border border-neutral-300 px-1.5 py-1"
+                  value={Math.round(exportPreview?.badge.r ?? 0)}
+                  disabled={!project}
+                  onChange={(e) => patchBadgeField("r", Number(e.target.value))}
+                />
+              </label>
+              <label className="flex flex-col gap-0.5">
+                Font size
+                <input
+                  type="number"
+                  min={8}
+                  className="rounded border border-neutral-300 px-1.5 py-1"
+                  value={Math.round(exportPreview?.badge.fontSize ?? 0)}
+                  disabled={!project}
+                  onChange={(e) => patchBadgeField("fontSize", Number(e.target.value))}
+                />
+              </label>
+            </div>
+            <div className="mt-2 flex gap-2">
+              <button
+                type="button"
+                disabled={!project}
+                onClick={() => setTool("badge")}
+                className="flex-1 rounded bg-neutral-200 px-2 py-1.5 text-xs disabled:opacity-40"
+              >
+                Edit on canvas
+              </button>
+              <button
+                type="button"
+                disabled={!project}
+                onClick={resetBadgeLayout}
+                className="rounded bg-neutral-100 px-2 py-1.5 text-xs text-neutral-600 disabled:opacity-40"
+              >
+                Reset
+              </button>
+            </div>
+          </Section>
+
           <Section title="Export">
+            <label className="mb-2 flex flex-col gap-0.5 text-xs">
+              Plan width (px)
+              <input
+                type="number"
+                min={EXPORT_WIDTH_MIN}
+                max={EXPORT_WIDTH_MAX}
+                step={50}
+                className="rounded border border-neutral-300 px-1.5 py-1"
+                value={exportPreview?.planW ?? AEON_CONFIG.normalizedWidth}
+                disabled={!project}
+                onChange={(e) => setExportWidth(Number(e.target.value))}
+              />
+            </label>
+            <div className="mb-2">
+              <div className="mb-1 text-xs text-neutral-500">PNG scale</div>
+              <div className="flex gap-1">
+                {[1, 2, 3].map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    disabled={!project}
+                    onClick={() => setPngScale(s)}
+                    className={`flex-1 rounded px-2 py-1.5 text-xs ${
+                      (exportPreview?.pngScale ?? DEFAULT_PNG_SCALE) === s
+                        ? "bg-brand text-white"
+                        : "bg-neutral-200 text-neutral-700"
+                    } disabled:opacity-40`}
+                  >
+                    {s}×
+                  </button>
+                ))}
+              </div>
+            </div>
+            {exportPreview && (
+              <div className="mb-2 rounded bg-neutral-50 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-neutral-600">
+                SVG {exportPreview.svgW}×{exportPreview.svgH}
+                <br />
+                PNG {exportPreview.pngW}×{exportPreview.pngH}
+              </div>
+            )}
             <div className="flex gap-2">
               <button onClick={doExportSvg} disabled={!project || !project.shapes.length}
                 className="flex-1 rounded bg-brand px-2 py-1.5 text-sm text-white hover:bg-brand-hover disabled:opacity-40">Export SVG</button>
@@ -1067,6 +1224,7 @@ export default function ManualPage() {
                 "Click = corner · drag = curve · exact cursor · Space = pan"}
               {tool === "outline" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
+              {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&
                 "Alt-drag from selected point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}
             </span>
@@ -1090,18 +1248,12 @@ export default function ManualPage() {
                   onUpdateShapeVerts={updateShapeVerts}
                   onSetShell={setShell}
                   onRequestTool={setTool}
+                  onUpdateBadgeLayout={updateBadgeLayout}
                 />
               </div>
             ) : (
               <div className="flex h-full items-center justify-center text-neutral-400">
                 Upload a denah to start drawing.
-              </div>
-            )}
-
-            {busy && (
-              <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-white/40 backdrop-blur-[2px]">
-                <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand-soft border-t-brand" />
-                <div className="rounded-full bg-white/90 px-3 py-1 text-xs font-medium text-neutral-700 shadow-sm">Seeding from auto…</div>
               </div>
             )}
 
