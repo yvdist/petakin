@@ -1,5 +1,5 @@
+import Link from "next/link";
 import Reveal from "./ui/reveal";
-import WaitlistForm from "./ui/waitlist-form";
 import FloorBadge from "./ui/floor-badge";
 
 export default function Cta() {
@@ -18,14 +18,19 @@ export default function Cta() {
             <FloorBadge />
           </div>
           <h2 className="font-inter-tight text-[30px] font-bold leading-tight tracking-tight text-l-ink md:text-[40px]">
-            Want to try it when access opens?
+            Ready to map your floor plan?
           </h2>
           <p className="mt-4 max-w-[52ch] font-inter text-[16px] leading-relaxed text-l-ink-muted">
-            We’re opening access gradually. Leave your email and we’ll reach out the moment Petakin
-            is ready for you.
+            Manual mode is live. Upload a vendor plan, draw units over the underlay, and export
+            transparent SVG for Figma or wayfinding.
           </p>
-          <div id="waitlist-cta" className="mt-8 scroll-mt-24">
-            <WaitlistForm source="cta" />
+          <div className="mt-8">
+            <Link
+              href="/manual"
+              className="inline-flex rounded-md bg-primary px-5 py-2.5 font-inter text-[15px] font-medium text-white transition-colors hover:bg-[#0b665f] focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
+            >
+              Start mapping
+            </Link>
           </div>
         </Reveal>
       </div>

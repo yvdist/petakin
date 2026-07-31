@@ -42,8 +42,8 @@ export default function Problem() {
 
         <Reveal delay={120}>
           <p className="mt-12 max-w-[68ch] border-l-2 border-primary pl-4 font-inter text-[16px] leading-relaxed text-l-ink">
-            Petakin leads with manual mapping over an underlay — Auto mode is an optional starting
-            seed, not a replacement for the designer’s control.
+            Petakin leads with manual mapping over an underlay. Auto mode is paused for a rebuild —
+            Manual is the production path today.
           </p>
         </Reveal>
       </div>

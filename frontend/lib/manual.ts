@@ -44,7 +44,25 @@ export interface ManualProject {
   drawOpacity?: number;
   /** Optional layer tree (absent = no layers / all shapes ungrouped). */
   layerTree?: ManualLayerTree;
+  /**
+   * Export plan width (normalizedWidth). Full SVG width ≈ this + 2*pad + gutter.
+   * Default: AEON_CONFIG.normalizedWidth (1500).
+   */
+  exportNormalizedWidth?: number;
+  /** PNG raster multiplier over SVG viewBox. Default 1. */
+  pngScale?: number;
+  /** Floor badge in export (normalized) coordinates. */
+  badgeLayout?: ManualBadgeLayout;
   updatedAt: number;
+}
+
+/** Floor marker position/size in export SVG space. */
+export interface ManualBadgeLayout {
+  cx: number;
+  cy: number;
+  r: number;
+  fontSize: number;
+  strokeWidth: number;
 }
 
 export interface ManualLayer {
@@ -77,6 +95,11 @@ export interface ManualLayerTree {
 
 export const DEFAULT_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
 export const DEFAULT_DRAW_OPACITY = 1;
+export const DEFAULT_PNG_SCALE = 1;
+export const EXPORT_WIDTH_MIN = 400;
+export const EXPORT_WIDTH_MAX = 6000;
+export const PNG_SCALE_MIN = 1;
+export const PNG_SCALE_MAX = 3;
 
 export function emptyLayerTree(): ManualLayerTree {
   return { layers: [], groups: [], rootOrder: [], activeLayerId: null };
@@ -534,6 +557,134 @@ export function getDrawOpacity(project: ManualProject | null | undefined): numbe
   return Math.max(0.05, Math.min(1, v));
 }
 
+export function getExportNormalizedWidth(project: ManualProject | null | undefined): number {
+  const v = project?.exportNormalizedWidth;
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : AEON_CONFIG.normalizedWidth;
+  return Math.max(EXPORT_WIDTH_MIN, Math.min(EXPORT_WIDTH_MAX, Math.round(n)));
+}
+
+export function getPngScale(project: ManualProject | null | undefined): number {
+  const v = project?.pngScale;
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : DEFAULT_PNG_SCALE;
+  return Math.max(PNG_SCALE_MIN, Math.min(PNG_SCALE_MAX, Math.round(n)));
+}
+
+/** Content bbox in source-image space used by export. */
+export function contentBBox(project: ManualProject): {
+  x0: number;
+  y0: number;
+  x1: number;
+  y1: number;
+} {
+  const targetW = getExportNormalizedWidth(project);
+  const shellPts = project.shell && project.shell.length >= 3 ? project.shell : null;
+  let x0 = Infinity,
+    y0 = Infinity,
+    x1 = -Infinity,
+    y1 = -Infinity;
+  const consider = (pts: Point[]) => {
+    for (const [x, y] of pts) {
+      if (x < x0) x0 = x;
+      if (y < y0) y0 = y;
+      if (x > x1) x1 = x;
+      if (y > y1) y1 = y;
+    }
+  };
+  if (shellPts) consider(shellPts);
+  for (const s of project.shapes) {
+    if (!isShapeVisible(project, s.id)) continue;
+    const ring = s.points?.length >= 3 ? s.points : flattenPolyVerts(shapeVerts(s));
+    consider(ring);
+  }
+  if (!isFinite(x0)) {
+    x0 = 0;
+    y0 = 0;
+    x1 = project.bg.width || targetW;
+    y1 = project.bg.height || targetW;
+  }
+  return { x0, y0, x1, y1 };
+}
+
+export function defaultBadgeLayout(planWidth: number, gutter: number = AEON_CONFIG.gutter): ManualBadgeLayout {
+  const b = AEON_CONFIG.badge;
+  return {
+    cx: planWidth + gutter / 2,
+    cy: 150,
+    r: b.r,
+    fontSize: b.fontSize,
+    strokeWidth: b.strokeWidth,
+  };
+}
+
+export function getBadgeLayout(project: ManualProject): ManualBadgeLayout {
+  const pad = AEON_CONFIG.pad;
+  const gutter = AEON_CONFIG.gutter;
+  const targetW = getExportNormalizedWidth(project);
+  const planWidth = targetW + 2 * pad;
+  const fallback = defaultBadgeLayout(planWidth, gutter);
+  const b = project.badgeLayout;
+  if (!b) return fallback;
+  return {
+    cx: typeof b.cx === "number" && !Number.isNaN(b.cx) ? b.cx : fallback.cx,
+    cy: typeof b.cy === "number" && !Number.isNaN(b.cy) ? b.cy : fallback.cy,
+    r: Math.max(8, typeof b.r === "number" && !Number.isNaN(b.r) ? b.r : fallback.r),
+    fontSize: Math.max(8, typeof b.fontSize === "number" && !Number.isNaN(b.fontSize) ? b.fontSize : fallback.fontSize),
+    strokeWidth: Math.max(
+      1,
+      typeof b.strokeWidth === "number" && !Number.isNaN(b.strokeWidth) ? b.strokeWidth : fallback.strokeWidth,
+    ),
+  };
+}
+
+export type ExportLayout = {
+  x0: number;
+  y0: number;
+  scale: number;
+  pad: number;
+  gutter: number;
+  targetW: number;
+  planWidth: number;
+  width: number;
+  height: number;
+  badge: ManualBadgeLayout;
+};
+
+/** Same transform/metrics as emitManualSvg — for UI preview and badge editing. */
+export function computeExportLayout(project: ManualProject): ExportLayout {
+  const pad = AEON_CONFIG.pad;
+  const gutter = AEON_CONFIG.gutter;
+  const targetW = getExportNormalizedWidth(project);
+  const { x0, y0, x1, y1 } = contentBBox(project);
+  const spanX = Math.max(1, x1 - x0);
+  const spanY = Math.max(1, y1 - y0);
+  const scale = targetW / spanX;
+  const planWidth = targetW + 2 * pad;
+  const width = planWidth + gutter;
+  const height = Math.max(spanY * scale + 2 * pad, 330);
+  return {
+    x0,
+    y0,
+    scale,
+    pad,
+    gutter,
+    targetW,
+    planWidth,
+    width,
+    height,
+    badge: getBadgeLayout(project),
+  };
+}
+
+/** Map export-space point → source-image space. */
+export function exportToSource(layout: ExportLayout, p: Point): Point {
+  return [(p[0] - layout.pad) / layout.scale + layout.x0, (p[1] - layout.pad) / layout.scale + layout.y0];
+}
+
+/** Map source-image point → export space. */
+export function sourceToExport(layout: ExportLayout, p: Point): Point {
+  return [(p[0] - layout.x0) * layout.scale + layout.pad, (p[1] - layout.y0) * layout.scale + layout.pad];
+}
+
 // Categories a user can actually draw with (ignore is auto-only).
 export const DRAW_CATEGORIES: Category[] = [
   "fnb",
@@ -881,48 +1032,14 @@ export function emitManualSvg(
   title = "Petakin",
 ): { svg: string; width: number; height: number } {
   const cfg = AEON_CONFIG;
-  const pad = cfg.pad;
-  const gutter = cfg.gutter;
-  const targetW = cfg.normalizedWidth;
+  const layout = computeExportLayout(project);
+  const { pad, scale, x0, y0, width: W, height: H, badge } = layout;
   const stroke = getStroke(project);
-  const badge = cfg.badge;
   const shellPts = project.shell && project.shell.length >= 3 ? project.shell : null;
+  const badgeStroke = cfg.badge.stroke;
+  const textY = badge.cy + badge.fontSize * 0.36;
 
-  // bbox over shell + shapes (prefer densified / vert rings)
-  let x0 = Infinity,
-    y0 = Infinity,
-    x1 = -Infinity,
-    y1 = -Infinity;
-  const consider = (pts: Point[]) => {
-    for (const [x, y] of pts) {
-      if (x < x0) x0 = x;
-      if (y < y0) y0 = y;
-      if (x > x1) x1 = x;
-      if (y > y1) y1 = y;
-    }
-  };
-  if (shellPts) consider(shellPts);
-  for (const s of project.shapes) {
-    if (!isShapeVisible(project, s.id)) continue;
-    const ring = s.points?.length >= 3 ? s.points : flattenPolyVerts(shapeVerts(s));
-    consider(ring);
-  }
-  if (!isFinite(x0)) {
-    x0 = 0;
-    y0 = 0;
-    x1 = project.bg.width || targetW;
-    y1 = project.bg.height || targetW;
-  }
-  const spanX = Math.max(1, x1 - x0);
-  const spanY = Math.max(1, y1 - y0);
-  const scale = targetW / spanX;
   const norm = (p: Point): Point => [(p[0] - x0) * scale + pad, (p[1] - y0) * scale + pad];
-
-  const planWidth = targetW + 2 * pad;
-  const W = planWidth + gutter;
-  const H = Math.max(spanY * scale + 2 * pad, 330);
-  const bcx = planWidth + gutter / 2;
-  const bcy = 150;
 
   const visibleShapes = project.shapes.filter((s) => isShapeVisible(project, s.id));
   const cats = CATEGORY_ORDER.filter((c) => visibleShapes.some((s) => s.category === c));
@@ -983,13 +1100,13 @@ export function emitManualSvg(
 
   o.push(`  <g id="badge">`);
   o.push(
-    `    <circle cx="${bcx.toFixed(0)}" cy="${bcy}" r="${badge.r}" fill="none" ` +
-      `stroke="${badge.stroke}" stroke-width="${badge.strokeWidth}"/>`,
+    `    <circle cx="${badge.cx.toFixed(1)}" cy="${badge.cy.toFixed(1)}" r="${badge.r.toFixed(1)}" fill="none" ` +
+      `stroke="${badgeStroke}" stroke-width="${badge.strokeWidth}"/>`,
   );
   o.push(
-    `    <text x="${bcx.toFixed(0)}" y="${bcy + 38}" text-anchor="middle" ` +
+    `    <text x="${badge.cx.toFixed(1)}" y="${textY.toFixed(1)}" text-anchor="middle" ` +
       `font-family="Arial, Helvetica, sans-serif" font-weight="700" ` +
-      `font-size="${badge.fontSize}" fill="${badge.stroke}">${esc(project.floor)}</text>`,
+      `font-size="${badge.fontSize}" fill="${badgeStroke}">${esc(project.floor)}</text>`,
   );
   o.push(`  </g>`);
   o.push(`</svg>`);
@@ -1058,6 +1175,8 @@ export function newProject(floor: string): ManualProject {
     shellVerts: null,
     stroke: { ...DEFAULT_STROKE },
     drawOpacity: DEFAULT_DRAW_OPACITY,
+    exportNormalizedWidth: AEON_CONFIG.normalizedWidth,
+    pngScale: DEFAULT_PNG_SCALE,
     layerTree: emptyLayerTree(),
     updatedAt: Date.now(),
   };
