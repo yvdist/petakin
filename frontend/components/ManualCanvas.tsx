@@ -11,6 +11,7 @@ import {
   exportToSource,
   flattenPolyVertsOpen,
   getDrawOpacity,
+  getShellStroke,
   getStroke,
   insertVertOnEdge,
   isShapeLocked,
@@ -121,6 +122,7 @@ export default function ManualCanvas({
   const { bg, shapes } = project;
   const shellV = shellVertsOf(project);
   const tenantStroke = getStroke(project);
+  const shellStroke = getShellStroke(project);
   const drawOpacity = getDrawOpacity(project);
   const exportLayout = computeExportLayout(project);
   const badge = exportLayout.badge;
@@ -698,6 +700,7 @@ export default function ManualCanvas({
 
   const uiSw = 2 / view.scale;
   const strokeW = tenantStroke.width;
+  const shellStrokeW = shellStroke.width;
   const handleR = 5 / view.scale;
 
   const liveVertsFor = (id: string, fallback: PolyVert[]) =>
@@ -860,9 +863,9 @@ export default function ManualCanvas({
               <path
                 d={pathDFromVerts(shellLive)}
                 fill="none"
-                stroke={isShellSel ? BRAND : "#000000"}
-                strokeWidth={isShellSel ? strokeW * 2 : Math.max(strokeW * 1.5, 2)}
-                strokeLinejoin="miter"
+                stroke={isShellSel ? BRAND : shellStroke.color}
+                strokeWidth={isShellSel ? shellStrokeW * 2 : shellStrokeW}
+                strokeLinejoin="round"
                 strokeLinecap="round"
                 className={tool === "select" ? "cursor-move" : ""}
                 pointerEvents={tool === "select" ? "stroke" : "none"}

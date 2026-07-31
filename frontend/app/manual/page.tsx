@@ -12,6 +12,7 @@ import {
   CATEGORY_COLORS,
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
+  DEFAULT_SHELL_STROKE,
   DEFAULT_PNG_SCALE,
   EXPORT_WIDTH_MAX,
   EXPORT_WIDTH_MIN,
@@ -30,6 +31,7 @@ import {
   getExportNormalizedWidth,
   getLayerTree,
   getPngScale,
+  getShellStroke,
   getStroke,
   groupSelection,
   isManualProject,
@@ -464,6 +466,11 @@ export default function ManualPage() {
     updateActive((p) => ({ ...p, stroke: { ...getStroke(p), color } }));
   const setStrokeWidth = (width: number) =>
     updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }));
+  const shellStroke = getShellStroke(project);
+  const setShellStrokeColor = (color: string) =>
+    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), color } }));
+  const setShellStrokeWidth = (width: number) =>
+    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), width } }));
 
   // ---- layers ----
   // Display order (front → back) for Shift+click range selection
@@ -905,6 +912,39 @@ export default function ManualPage() {
               <div className="mb-2 text-neutral-500">
                 {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — use Outline tool"}
               </div>
+              <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                Color
+                <input
+                  type="color"
+                  value={shellStroke.color}
+                  onChange={(e) => setShellStrokeColor(e.target.value)}
+                  className="h-6 w-10 rounded border border-neutral-300"
+                />
+              </label>
+              <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                Width
+                <input
+                  type="range"
+                  min={1}
+                  max={12}
+                  step={1}
+                  value={shellStroke.width}
+                  onChange={(e) => setShellStrokeWidth(Number(e.target.value))}
+                  className="w-24 accent-brand"
+                />
+                <span className="w-6 font-mono">{shellStroke.width}</span>
+                px
+              </label>
+              <button
+                type="button"
+                className="mb-2 text-[11px] text-neutral-500 hover:underline"
+                onClick={() => {
+                  setShellStrokeColor(DEFAULT_SHELL_STROKE.color);
+                  setShellStrokeWidth(DEFAULT_SHELL_STROKE.width);
+                }}
+              >
+                Reset to white / 2px
+              </button>
               <div className="flex gap-2">
                 {shellPts && (
                   <button
