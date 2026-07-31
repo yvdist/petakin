@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 export default function Nav() {
   return (
     <header className="sticky top-0 z-50 border-b border-hairline bg-white/85 backdrop-blur">
@@ -18,12 +20,12 @@ export default function Nav() {
           <a href="#faq" className="hidden font-inter text-[14px] text-l-ink-muted hover:text-l-ink md:inline">
             FAQ
           </a>
-          <a
-            href="#waitlist-hero"
+          <Link
+            href="/manual"
             className="rounded-md bg-primary px-3.5 py-2 font-inter text-[14px] font-medium text-white transition-colors hover:bg-[#0b665f] focus:outline-none focus:ring-2 focus:ring-primary focus:ring-offset-2"
           >
-            Join waitlist
-          </a>
+            Open editor
+          </Link>
         </nav>
       </div>
     </header>

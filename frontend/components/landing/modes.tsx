@@ -10,7 +10,7 @@ export default function Modes() {
         <Reveal>
           <SectionLabel>03 — TWO MODES</SectionLabel>
           <h2 className="mt-3 font-inter-tight text-[26px] font-bold tracking-tight text-l-ink md:text-[34px]">
-            Manual does the work, Auto gives you a head start
+            Manual is live. Auto is on the way.
           </h2>
         </Reveal>
 
@@ -41,17 +41,17 @@ export default function Modes() {
             </div>
           </Reveal>
 
-          {/* Auto — optional, lighter */}
+          {/* Auto — parked */}
           <Reveal delay={80} className="md:pl-10">
             <div className="font-jbmono text-[11px] uppercase tracking-[0.08em] text-l-ink-faint">
-              OPTIONAL
+              UNDER CONSTRUCTION
             </div>
             <h3 className="mt-2 font-inter-tight text-[22px] font-semibold tracking-tight text-l-ink">
               Auto mode
             </h3>
             <p className="mt-3 max-w-[46ch] font-inter text-[16px] leading-relaxed text-l-ink-muted">
-              Per-category color segmentation plus presets. Use it on its own for a quick draft, or
-              Seed from auto into Manual for finishing. No “done automatically” promise.
+              Color segmentation and presets are getting a rebuild. For now, Manual is the full
+              production path — Auto will return as an optional seed when it’s ready.
             </p>
             <div className="mt-6">
               <CanvasFrame badge={false} strip={["AUTO", "SEGMENT + PRESET"]}>

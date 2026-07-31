@@ -11,8 +11,8 @@ const ITEMS: { q: string; a: string }[] = [
     a: "Unit-by-unit control. Vendor plans are often messy and inconsistent across floors; hand-drawing over an underlay is more dependable for production work than an automatic trace.",
   },
   {
-    q: "How accurate is Auto mode?",
-    a: "Useful as a seed / draft. It often gets most units in, but the rest — and the final quality — is cleaned up in Manual. We don't claim it finishes on its own.",
+    q: "What about Auto mode?",
+    a: "Auto mode is temporarily under construction. Manual mode is the main product and is fully available — draw over the underlay and export when you're ready.",
   },
   {
     q: "Which input formats are supported?",
@@ -27,8 +27,8 @@ const ITEMS: { q: string; a: string }[] = [
     a: "The flow is the same — underlay, draw units/zones, categorize, export. The built-in categories lean retail, but Manual mode doesn't limit what shapes you can draw.",
   },
   {
-    q: "When does access open?",
-    a: "Not public yet. Join the waitlist and we'll email you the moment access is available.",
+    q: "Is Petakin free to use?",
+    a: "Yes — Manual mode is open now. Open the editor, upload a floor plan, and start mapping.",
   },
 ];
 
