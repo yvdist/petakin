@@ -803,6 +803,13 @@ export default function ManualCanvas({
         }}
         onClick={onSvgClick}
       >
+        <defs>
+          {shellLive && (
+            <clipPath id="manual-shell">
+              <path d={pathDFromVerts(shellLive)} />
+            </clipPath>
+          )}
+        </defs>
         <g
           ref={contentRef}
           transform={`translate(${view.tx},${view.ty}) scale(${view.scale})`}
@@ -825,39 +832,40 @@ export default function ManualCanvas({
               <path d={pathDFromVerts(shellLive)} fill="#ECECEC88" stroke="none" pointerEvents="none" />
             )}
 
-            {/* No shell clip on canvas — large anchors near the edge stay visible while editing.
-                Export still clips via emitManualSvg. */}
-            {paintOrder.map((s) => {
-              const verts = liveVertsFor(s.id, shapeVerts(s));
-              return (
-                <path
-                  key={`f-${s.id}`}
-                  d={pathDFromVerts(verts)}
-                  fill={s.fill || defaultFill(s.category)}
-                  stroke="none"
-                  pointerEvents="none"
-                />
-              );
-            })}
-            {paintOrder.map((s) => {
-              const verts = liveVertsFor(s.id, shapeVerts(s));
-              const isSel = s.id === selectedId;
-              const isHov = hovered === s.id;
-              const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
-              const sw = isSel ? strokeW * 1.6 : strokeW;
-              return (
-                <path
-                  key={`o-${s.id}`}
-                  d={pathDFromVerts(verts)}
-                  fill="none"
-                  stroke={stroke}
-                  strokeWidth={sw}
-                  strokeLinejoin="round"
-                  strokeLinecap="round"
-                  pointerEvents="none"
-                />
-              );
-            })}
+            {/* Clip unit paint to shell; hit targets + vertex handles stay outside so edge edits remain usable. */}
+            <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
+              {paintOrder.map((s) => {
+                const verts = liveVertsFor(s.id, shapeVerts(s));
+                return (
+                  <path
+                    key={`f-${s.id}`}
+                    d={pathDFromVerts(verts)}
+                    fill={s.fill || defaultFill(s.category)}
+                    stroke="none"
+                    pointerEvents="none"
+                  />
+                );
+              })}
+              {paintOrder.map((s) => {
+                const verts = liveVertsFor(s.id, shapeVerts(s));
+                const isSel = s.id === selectedId;
+                const isHov = hovered === s.id;
+                const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
+                const sw = isSel ? strokeW * 1.6 : strokeW;
+                return (
+                  <path
+                    key={`o-${s.id}`}
+                    d={pathDFromVerts(verts)}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={sw}
+                    strokeLinejoin="round"
+                    strokeLinecap="round"
+                    pointerEvents="none"
+                  />
+                );
+              })}
+            </g>
 
             {shellLive && (
               <path
