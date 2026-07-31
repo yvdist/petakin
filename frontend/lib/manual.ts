@@ -40,6 +40,8 @@ export interface ManualProject {
   shellVerts?: PolyVert[] | null;
   /** Stroke for tenant rect/poly (default white). */
   stroke?: ManualStroke;
+  /** Outer shell outline stroke (default white). Independent of tenant stroke. */
+  shellStroke?: ManualStroke;
   /** Editor-only opacity for drawn shapes/shell (0.05–1). Export stays full. */
   drawOpacity?: number;
   /** Optional layer tree (absent = no layers / all shapes ungrouped). */
@@ -94,6 +96,7 @@ export interface ManualLayerTree {
 }
 
 export const DEFAULT_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
+export const DEFAULT_SHELL_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
 export const DEFAULT_DRAW_OPACITY = 1;
 export const DEFAULT_PNG_SCALE = 1;
 export const EXPORT_WIDTH_MIN = 400;
@@ -548,6 +551,15 @@ export function getStroke(project: ManualProject | null | undefined): ManualStro
   return {
     color: typeof s.color === "string" && s.color ? s.color : DEFAULT_STROKE.color,
     width: Math.max(1, Math.min(12, Number(s.width) || DEFAULT_STROKE.width)),
+  };
+}
+
+export function getShellStroke(project: ManualProject | null | undefined): ManualStroke {
+  const s = project?.shellStroke;
+  if (!s) return { ...DEFAULT_SHELL_STROKE };
+  return {
+    color: typeof s.color === "string" && s.color ? s.color : DEFAULT_SHELL_STROKE.color,
+    width: Math.max(1, Math.min(12, Number(s.width) || DEFAULT_SHELL_STROKE.width)),
   };
 }
 
@@ -1047,7 +1059,9 @@ export function emitManualSvg(
 
   const strokeHex = stroke.color;
   const strokeW = stroke.width * scale;
-  const shellStrokeW = Math.max(strokeW * 1.5, 2 * scale);
+  const shellStroke = getShellStroke(project);
+  const shellStrokeHex = shellStroke.color;
+  const shellStrokeW = shellStroke.width * scale;
   const shellNorm = shellPts ? shellPts.map(norm) : null;
 
   const o: string[] = [
@@ -1063,8 +1077,8 @@ export function emitManualSvg(
     o.push(`  </defs>`);
     o.push(`  <g id="shell">`);
     o.push(
-      `    <path fill="${cfg.shellFill}" stroke="#000000" stroke-width="${shellStrokeW.toFixed(2)}" ` +
-        `stroke-linejoin="miter" stroke-linecap="round" d="${d(shellNorm)}"/>`,
+      `    <path fill="${cfg.shellFill}" stroke="${shellStrokeHex}" stroke-width="${shellStrokeW.toFixed(2)}" ` +
+        `stroke-linejoin="round" stroke-linecap="round" d="${d(shellNorm)}"/>`,
     );
     o.push(`  </g>`);
   }
@@ -1174,6 +1188,7 @@ export function newProject(floor: string): ManualProject {
     shell: null,
     shellVerts: null,
     stroke: { ...DEFAULT_STROKE },
+    shellStroke: { ...DEFAULT_SHELL_STROKE },
     drawOpacity: DEFAULT_DRAW_OPACITY,
     exportNormalizedWidth: AEON_CONFIG.normalizedWidth,
     pngScale: DEFAULT_PNG_SCALE,
