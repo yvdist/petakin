@@ -1234,6 +1234,203 @@ export function emitManualSvg(
   return { svg: o.join("\n"), width: W, height: H };
 }
 
+// ---- import: parse a Petakin-exported SVG back into an editable project ----
+// Inverse of emitManualSvg. Recovers shape outlines, categories, fills, group
+// nesting/names, floor, shell, strokes and badge. NOT recoverable (not emitted):
+// the denah image, real shape/leaf ids+names, shape kind (rect/ellipse), node
+// lock/visible flags, and the original image-space transform — coords come back
+// in the SVG's export space, which we adopt verbatim as the new working space.
+
+/** ~coordinate equality; export coords are rounded to .1 so .15 is a safe slop. */
+function approxPt(a: Point, b: Point, eps = 0.15): boolean {
+  return Math.abs(a[0] - b[0]) <= eps && Math.abs(a[1] - b[1]) <= eps;
+}
+
+/**
+ * Inverse of pathDFromVerts()/d(): parse an absolute closed path ("M …" with
+ * L/C segments or implicit-lineto polyline, ending "Z") back into PolyVert[].
+ * Detects and strips the 1/3 & 2/3 lerp fallbacks pathDFromVerts emits for
+ * missing handles, so a plain polygon round-trips with no spurious handles and
+ * a curved shape re-emits an identical `d`.
+ */
+export function parsePathD(dStr: string): PolyVert[] {
+  const tokens = dStr.match(/[a-zA-Z]|-?\d*\.?\d+(?:[eE][-+]?\d+)?/g);
+  if (!tokens) return [];
+  const verts: PolyVert[] = [];
+  let cmd = "";
+  let i = 0;
+  const num = (): number => parseFloat(tokens[i++]);
+  while (i < tokens.length) {
+    const t = tokens[i];
+    if (/[a-zA-Z]/.test(t)) {
+      cmd = t.toUpperCase();
+      i++;
+      if (cmd === "Z") break;
+      continue;
+    }
+    if (cmd === "M") {
+      verts.push({ p: [num(), num()] });
+      cmd = "L"; // subsequent coord pairs are implicit linetos (SVG spec, d())
+    } else if (cmd === "L") {
+      verts.push({ p: [num(), num()] });
+    } else if (cmd === "C" && verts.length) {
+      const a = verts[verts.length - 1].p;
+      const c1: Point = [num(), num()];
+      const c2: Point = [num(), num()];
+      const p: Point = [num(), num()];
+      const lerp1: Point = [a[0] + (p[0] - a[0]) / 3, a[1] + (p[1] - a[1]) / 3];
+      const lerp2: Point = [a[0] + (2 * (p[0] - a[0])) / 3, a[1] + (2 * (p[1] - a[1])) / 3];
+      if (!approxPt(c1, lerp1)) verts[verts.length - 1].handleOut = c1;
+      const v: PolyVert = { p };
+      if (!approxPt(c2, lerp2)) v.handleOut = [2 * p[0] - c2[0], 2 * p[1] - c2[1]];
+      verts.push(v);
+    } else {
+      i++; // unexpected (relative/other) — skip defensively
+    }
+  }
+  // pathDFromVerts closes with a segment back to verts[0]; that yields a trailing
+  // vert coincident with the first. Drop it (carry its handle onto the first if
+  // the first didn't already get one).
+  if (verts.length >= 2) {
+    const first = verts[0];
+    const last = verts[verts.length - 1];
+    if (approxPt(first.p, last.p)) {
+      if (!first.handleOut && last.handleOut) first.handleOut = last.handleOut;
+      verts.pop();
+    }
+  }
+  return verts;
+}
+
+function svgHexFill(fill: string | null, category: Category): string {
+  const raw = (fill ?? "").trim();
+  if (/^#[0-9A-Fa-f]{3,8}$/.test(raw)) return raw;
+  if (/^[0-9A-Fa-f]{6}$/.test(raw)) return `#${raw}`;
+  return defaultFill(category);
+}
+
+function svgCategory(fam: string | null): Category {
+  return (DRAW_CATEGORIES as string[]).includes(fam ?? "") ? (fam as Category) : "specialty";
+}
+
+/** Parse an exported Petakin manual-mode SVG into an editable ManualProject. */
+export function parseManualSvg(svgText: string): ManualProject {
+  const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+  if (doc.getElementsByTagName("parsererror").length || !doc.querySelector("svg")) {
+    throw new Error("not a valid SVG");
+  }
+
+  // floor: "<title>Petakin - {floor}</title>", fallback to badge text
+  const titleTxt = doc.querySelector("title")?.textContent?.trim() ?? "";
+  const dash = titleTxt.indexOf(" - ");
+  const badgeText = doc.querySelector("#badge text")?.textContent?.trim() ?? "";
+  const floor = (dash >= 0 ? titleTxt.slice(dash + 3).trim() : "") || badgeText || "?F";
+
+  // shapes + layer tree: walk <g id="units"> recursively, mirroring emitNodes()
+  const shapes: ManualShape[] = [];
+  const walk = (parent: Element): ManualNode[] => {
+    const out: ManualNode[] = [];
+    for (const el of Array.from(parent.children)) {
+      if (el.tagName === "g" && (el.getAttribute("id") ?? "").startsWith("node-")) {
+        out.push({
+          id: newNodeId(),
+          kind: "container",
+          name: el.getAttribute("data-name") ?? "",
+          locked: false,
+          visible: true,
+          children: walk(el),
+        });
+      } else if (el.tagName === "path" && el.hasAttribute("data-family")) {
+        // the fill path (stroke sibling carries data-stroke-for instead — skipped)
+        const cat = svgCategory(el.getAttribute("data-family"));
+        const verts = parsePathD(el.getAttribute("d") ?? "");
+        if (verts.length < 2) continue;
+        const id = newShapeId();
+        shapes.push({
+          id,
+          kind: "poly",
+          points: verts.map((v) => v.p),
+          verts,
+          category: cat,
+          fill: svgHexFill(el.getAttribute("fill"), cat),
+          name: el.getAttribute("id") ?? undefined,
+        });
+        out.push({
+          id: newNodeId("l"),
+          kind: "leaf",
+          name: el.getAttribute("id") ?? "",
+          locked: false,
+          visible: true,
+          shapeId: id,
+        });
+      }
+    }
+    return out;
+  };
+  const unitsG = doc.querySelector("#units");
+  const root = unitsG ? walk(unitsG) : [];
+
+  // shell + shell stroke. NB: the id "shell" is on both <clipPath> and <g>; scope
+  // to the <g> so we read the styled fill path, not the stroke-less clip path.
+  const shellPath =
+    (doc.querySelector("g#shell path") as SVGPathElement | null) ??
+    (doc.querySelector("#shell path") as SVGPathElement | null);
+  const shellVerts = shellPath ? parsePathD(shellPath.getAttribute("d") ?? "") : [];
+  const shell = shellVerts.length >= 3 ? shellVerts.map((v) => v.p) : null;
+  const shellStroke: ManualStroke = shellPath
+    ? {
+        color: shellPath.getAttribute("stroke") || DEFAULT_SHELL_STROKE.color,
+        width: parseFloat(shellPath.getAttribute("stroke-width") || "") || DEFAULT_SHELL_STROKE.width,
+      }
+    : { ...DEFAULT_SHELL_STROKE };
+
+  // tenant stroke: first <path data-stroke-for>
+  const strokePath = doc.querySelector("path[data-stroke-for]");
+  const stroke: ManualStroke = strokePath
+    ? {
+        color: strokePath.getAttribute("stroke") || DEFAULT_STROKE.color,
+        width: parseFloat(strokePath.getAttribute("stroke-width") || "") || DEFAULT_STROKE.width,
+      }
+    : { ...DEFAULT_STROKE };
+
+  // badge
+  const circle = doc.querySelector("#badge circle");
+  const text = doc.querySelector("#badge text");
+  const numAttr = (el: Element | null, a: string): number => parseFloat(el?.getAttribute(a) || "");
+  let badgeLayout: ManualBadgeLayout | undefined;
+  if (circle) {
+    const cx = numAttr(circle, "cx");
+    const cy = numAttr(circle, "cy");
+    const r = numAttr(circle, "r");
+    const strokeWidth = numAttr(circle, "stroke-width");
+    const fontSize = numAttr(text, "font-size");
+    if (!Number.isNaN(cx) && !Number.isNaN(cy) && !Number.isNaN(r)) {
+      badgeLayout = {
+        cx,
+        cy,
+        r,
+        fontSize: !Number.isNaN(fontSize) ? fontSize : AEON_CONFIG.badge.fontSize,
+        strokeWidth: !Number.isNaN(strokeWidth) ? strokeWidth : AEON_CONFIG.badge.strokeWidth,
+      };
+    }
+  }
+
+  return {
+    version: 2,
+    floor,
+    bg: { dataUrl: "", width: 0, height: 0, opacity: 0.4 },
+    shapes,
+    shell,
+    shellVerts: shellVerts.length >= 3 ? shellVerts : null,
+    stroke,
+    shellStroke,
+    layerTree: { root, activeContainerId: null },
+    exportNormalizedWidth: AEON_CONFIG.normalizedWidth,
+    badgeLayout,
+    updatedAt: Date.now(),
+  };
+}
+
 // ---- seed from the auto pipeline: geometry.units -> editable shapes ----
 export function seedFromGeometry(geo: Geometry): ManualShape[] {
   const t = geo.transform;
