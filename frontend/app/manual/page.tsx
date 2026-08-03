@@ -46,6 +46,7 @@ import {
   newShapeId,
   newWorkspace,
   nodeIdForShape,
+  parseManualSvg,
   patchNode,
   removeLeafForShape,
   removeVert,
@@ -163,6 +164,7 @@ export default function ManualPage() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState<"idle" | "saving" | "saved">("idle");
   const importRef = useRef<HTMLInputElement>(null);
+  const importSvgRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
 
@@ -720,6 +722,30 @@ export default function ManualPage() {
     reader.readAsText(f);
   };
 
+  // Recover an editable project from a previously exported SVG (when the project
+  // JSON was lost). Lossy: no denah, shape kinds→poly, hidden shapes gone — see
+  // parseManualSvg. Opens as a new tab, like the JSON project import.
+  const importSvg = (f: File) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const project = parseManualSvg(String(reader.result));
+        setWorkspace((ws) => {
+          const base = ws ?? newWorkspace(project.floor || "1F");
+          const tab = makeTab(project);
+          return { ...base, tabs: [...base.tabs, tab], activeTabId: tab.id };
+        });
+        setSelectedId(null);
+        setSelectedVertIndex(null);
+        setFile(null);
+        setError("Imported from SVG. Re-attach the denah (background image) — it isn't stored in SVG.");
+      } catch (e) {
+        setError("Invalid SVG: " + String(e));
+      }
+    };
+    reader.readAsText(f);
+  };
+
   const doNew = () => {
     if (!confirm("Reset the active tab to a blank project? Other tabs are kept.")) return;
     updateActive(() => newProject(project?.floor ?? "1F"));
@@ -1039,6 +1065,9 @@ export default function ManualPage() {
               <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
                 Import
               </button>
+              <button onClick={() => importSvgRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import SVG
+              </button>
               <input
                 ref={importRef}
                 type="file"
@@ -1046,9 +1075,17 @@ export default function ManualPage() {
                 className="hidden"
                 onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
               />
+              <input
+                ref={importSvgRef}
+                type="file"
+                accept="image/svg+xml,.svg"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importSvg(e.target.files[0])}
+              />
             </div>
             <p className="mt-2 text-[11px] text-neutral-400">
               Import accepts a single floor JSON or a full workspace (adds as new tabs).
+              Import SVG recovers a lost project from an exported SVG (no denah, kinds→poly).
             </p>
           </Section>
 
