@@ -1,49 +1,35 @@
 "use client";
 import { useCallback, useState } from "react";
-import type { ManualProject, ManualShape } from "@/lib/manual";
+import type { ManualNode, ManualProject, ManualShape } from "@/lib/manual";
 import {
+  collectDescendantIds,
+  findNode,
   getLayerTree,
-  groupForLayer,
-  ungroupedShapeIds,
-  type LayerMoveTarget,
+  isNodeLocked,
+  isNodeVisible,
 } from "@/lib/manual";
+
+type DropPos = "before" | "after" | "into";
 
 type Props = {
   project: ManualProject;
-  selectedLayerIds: string[];
-  selectedShapeIds: string[];
-  onSelectLayer: (id: string, e: React.MouseEvent) => void;
-  onSelectShape: (id: string, e: React.MouseEvent) => void;
-  onToggleLayerVisible: (id: string) => void;
-  onToggleLayerLocked: (id: string) => void;
-  onToggleGroupVisible: (id: string) => void;
-  onToggleGroupLocked: (id: string) => void;
-  onToggleGroupCollapsed: (id: string) => void;
-  onToggleLayerCollapsed: (id: string) => void;
-  onRenameLayer: (id: string) => void;
-  onRenameGroup: (id: string) => void;
-  onNewLayer: () => void;
+  /** Selected tree-node ids (containers + leaves). */
+  selectedIds: string[];
+  activeContainerId: string | null;
+  canGroup: boolean;
+  onSelectNode: (id: string, e: React.MouseEvent) => void;
+  onToggleVisible: (id: string) => void;
+  onToggleLocked: (id: string) => void;
+  onToggleCollapsed: (id: string) => void;
+  onRenameNode: (id: string) => void;
+  onNewContainer: () => void;
   onGroup: () => void;
   onDeleteNodes: () => void;
-  onSetActiveLayer: (id: string | null) => void;
-  /** Display-order (front→back) of root node ids → caller reverses to model. */
-  onReorderRoot: (displayOrder: string[]) => void;
-  onMoveLayer: (layerId: string, target: LayerMoveTarget, indexModel: number) => void;
-  onMoveShape: (shapeId: string, targetLayerId: string | null, indexModel: number) => void;
-  onReorderUngrouped: (displayOrder: string[]) => void;
+  onSetActiveContainer: (id: string | null) => void;
+  /** Move node under parentId (null = root) at model index. */
+  onMoveNode: (id: string, parentId: string | null, index: number) => void;
   onCollapseAll: (collapsed: boolean) => void;
 };
-
-type DragPayload =
-  | { kind: "node"; id: string }
-  | { kind: "shape"; id: string; fromLayerId: string | null };
-
-type DropHint =
-  | { kind: "root"; beforeId: string | null } // null = after last (display bottom = model front)
-  | { kind: "group"; groupId: string; beforeId: string | null }
-  | { kind: "layerShapes"; layerId: string; beforeId: string | null }
-  | { kind: "ungrouped"; beforeId: string | null }
-  | { kind: "intoGroup"; groupId: string };
 
 function EyeIcon({ on }: { on: boolean }) {
   return (
@@ -82,390 +68,260 @@ function LockIcon({ on }: { on: boolean }) {
   );
 }
 
-function GripIcon() {
-  return (
-    <svg width="10" height="14" viewBox="0 0 10 14" fill="currentColor" className="text-neutral-400" aria-hidden>
-      <circle cx="3" cy="3" r="1.2" />
-      <circle cx="7" cy="3" r="1.2" />
-      <circle cx="3" cy="7" r="1.2" />
-      <circle cx="7" cy="7" r="1.2" />
-      <circle cx="3" cy="11" r="1.2" />
-      <circle cx="7" cy="11" r="1.2" />
-    </svg>
-  );
-}
-
 function shapeLabel(s: ManualShape): string {
   return s.name?.trim() || `${s.kind} · ${s.category}`;
 }
 
-/** Insert `id` before `beforeId` in display list (null = append). */
-function insertInDisplay(list: string[], id: string, beforeId: string | null): string[] {
-  const without = list.filter((x) => x !== id);
-  if (beforeId == null) return [...without, id];
-  const i = without.indexOf(beforeId);
-  if (i < 0) return [...without, id];
-  return [...without.slice(0, i), id, ...without.slice(i)];
-}
-
-/** Display index → model index (display is reverse of model). */
-function displayInsertToModelIndex(displayList: string[], beforeId: string | null, movingId: string): number {
-  const display = insertInDisplay(displayList, movingId, beforeId);
-  const model = [...display].reverse();
-  return model.indexOf(movingId);
+function nodeLabel(node: ManualNode, shapeMap: Map<string, ManualShape>): string {
+  if (node.kind === "container") return node.name || "Group";
+  if (node.name?.trim()) return node.name.trim();
+  const s = shapeMap.get(node.shapeId);
+  return s ? shapeLabel(s) : "shape";
 }
 
 export default function LayersPanel({
   project,
-  selectedLayerIds,
-  selectedShapeIds,
-  onSelectLayer,
-  onSelectShape,
-  onToggleLayerVisible,
-  onToggleLayerLocked,
-  onToggleGroupVisible,
-  onToggleGroupLocked,
-  onToggleGroupCollapsed,
-  onToggleLayerCollapsed,
-  onRenameLayer,
-  onRenameGroup,
-  onNewLayer,
+  selectedIds,
+  activeContainerId,
+  canGroup,
+  onSelectNode,
+  onToggleVisible,
+  onToggleLocked,
+  onToggleCollapsed,
+  onRenameNode,
+  onNewContainer,
   onGroup,
   onDeleteNodes,
-  onSetActiveLayer,
-  onReorderRoot,
-  onMoveLayer,
-  onMoveShape,
-  onReorderUngrouped,
+  onSetActiveContainer,
+  onMoveNode,
   onCollapseAll,
 }: Props) {
   const tree = getLayerTree(project);
-  const ungrouped = ungroupedShapeIds(project);
   const shapeMap = new Map(project.shapes.map((s) => [s.id, s]));
-  const canGroup =
-    selectedLayerIds.length + selectedShapeIds.filter((id) => ungrouped.includes(id)).length >= 2;
 
-  // Display order: front → back (reverse of model)
-  const rootDisplay = [...tree.rootOrder].reverse();
-  const ungroupedDisplay = [...ungrouped].reverse();
-
-  const [drag, setDrag] = useState<DragPayload | null>(null);
-  const [dropHint, setDropHint] = useState<DropHint | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [hint, setHint] = useState<{ targetId: string; pos: DropPos } | null>(null);
 
   const clearDrag = useCallback(() => {
-    setDrag(null);
-    setDropHint(null);
+    setDragId(null);
+    setHint(null);
   }, []);
 
+  /** Reject dropping a container into itself / a descendant, or under a locked node. */
+  const dropAllowed = useCallback(
+    (movedId: string, targetId: string, pos: DropPos): boolean => {
+      if (movedId === targetId) return false;
+      const moved = findNode(tree, movedId);
+      if (!moved) return false;
+      if (moved.node.kind === "container" && collectDescendantIds(moved.node).has(targetId)) {
+        return false;
+      }
+      const target = findNode(tree, targetId);
+      if (!target) return false;
+      if (pos === "into") {
+        if (target.node.kind !== "container") return false;
+        if (isNodeLocked(project, targetId)) return false;
+      } else {
+        // dropping as a sibling of target → parent must not be locked
+        const parentId = target.parent ? target.parent.id : null;
+        if (parentId && isNodeLocked(project, parentId)) return false;
+      }
+      return true;
+    },
+    [tree, project],
+  );
+
   const commitDrop = useCallback(() => {
-    if (!drag || !dropHint) {
+    if (!dragId || !hint) {
       clearDrag();
       return;
     }
-
-    if (drag.kind === "node") {
-      const isGroup = !!tree.groups.find((g) => g.id === drag.id);
-      const isLayer = !!tree.layers.find((l) => l.id === drag.id);
-
-      if (dropHint.kind === "intoGroup" && isLayer) {
-        // Append to front of group in model (= start of reversed display = end of model)
-        const g = tree.groups.find((x) => x.id === dropHint.groupId);
-        if (g) {
-          const displayKids = g.childIds.filter((id) => id !== drag.id);
-          // insert at display top = model end
-          onMoveLayer(drag.id, { type: "group", groupId: dropHint.groupId }, displayKids.length);
-        }
-      } else if (dropHint.kind === "group" && isLayer) {
-        const g = tree.groups.find((x) => x.id === dropHint.groupId);
-        if (g) {
-          const displayKids = [...g.childIds].reverse().filter((id) => id !== drag.id);
-          const indexModel = displayInsertToModelIndex(
-            [...g.childIds].reverse(),
-            dropHint.beforeId,
-            drag.id,
-          );
-          void displayKids;
-          onMoveLayer(drag.id, { type: "group", groupId: dropHint.groupId }, indexModel);
-        }
-      } else if (dropHint.kind === "root") {
-        if (isGroup || (isLayer && !groupForLayer(tree, drag.id))) {
-          // Reorder among root (or pull layer out of group into root)
-          if (isLayer && groupForLayer(tree, drag.id)) {
-            const displayRoot = rootDisplay.filter((id) => id !== drag.id);
-            const indexModel = displayInsertToModelIndex(rootDisplay, dropHint.beforeId, drag.id);
-            void displayRoot;
-            onMoveLayer(drag.id, { type: "root" }, indexModel);
-          } else {
-            const nextDisplay = insertInDisplay(rootDisplay, drag.id, dropHint.beforeId);
-            onReorderRoot(nextDisplay);
-          }
-        } else if (isLayer) {
-          const indexModel = displayInsertToModelIndex(rootDisplay, dropHint.beforeId, drag.id);
-          onMoveLayer(drag.id, { type: "root" }, indexModel);
-        }
+    const { targetId, pos } = hint;
+    if (!dropAllowed(dragId, targetId, pos)) {
+      clearDrag();
+      return;
+    }
+    if (pos === "into") {
+      const container = findNode(tree, targetId);
+      if (container && container.node.kind === "container") {
+        const siblings = container.node.children.filter((c) => c.id !== dragId);
+        onMoveNode(dragId, targetId, siblings.length); // front / top of container
       }
-    } else if (drag.kind === "shape") {
-      if (dropHint.kind === "layerShapes") {
-        const layer = tree.layers.find((l) => l.id === dropHint.layerId);
-        if (layer) {
-          const displayShapes = [...layer.shapeIds].reverse();
-          const indexModel = displayInsertToModelIndex(displayShapes, dropHint.beforeId, drag.id);
-          onMoveShape(drag.id, dropHint.layerId, indexModel);
-        }
-      } else if (dropHint.kind === "ungrouped") {
-        // Move to ungrouped, then reorder
-        onMoveShape(drag.id, null, 0);
-        const display = insertInDisplay(
-          ungroupedDisplay.filter((id) => id !== drag.id),
-          drag.id,
-          dropHint.beforeId,
+    } else {
+      const tf = findNode(tree, targetId);
+      if (tf) {
+        const parentId = tf.parent ? tf.parent.id : null;
+        const siblingsModel = (tf.parent ? tf.parent.children : tree.root).filter(
+          (c) => c.id !== dragId,
         );
-        // After ungroup, reorder among ungrouped — pass display order
-        onReorderUngrouped(display);
+        const displaySibs = [...siblingsModel].reverse();
+        const tIdx = displaySibs.findIndex((c) => c.id === targetId);
+        if (tIdx >= 0) {
+          const displayInsertPos = pos === "before" ? tIdx : tIdx + 1;
+          const index = siblingsModel.length - displayInsertPos;
+          onMoveNode(dragId, parentId, index);
+        }
       }
     }
-
     clearDrag();
-  }, [
-    drag,
-    dropHint,
-    tree,
-    rootDisplay,
-    ungroupedDisplay,
-    onMoveLayer,
-    onReorderRoot,
-    onMoveShape,
-    onReorderUngrouped,
-    clearDrag,
-  ]);
+  }, [dragId, hint, dropAllowed, tree, onMoveNode, clearDrag]);
 
-  const onDragStartNode = (id: string) => (e: React.DragEvent) => {
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", id);
-    setDrag({ kind: "node", id });
+  /** Choose drop position from pointer offset within the row. */
+  const posFromEvent = (e: React.DragEvent, isContainer: boolean): DropPos => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    const y = (e.clientY - rect.top) / Math.max(1, rect.height);
+    if (isContainer) {
+      if (y < 0.3) return "before";
+      if (y > 0.7) return "after";
+      return "into";
+    }
+    return y < 0.5 ? "before" : "after";
   };
 
-  const onDragStartShape = (id: string, fromLayerId: string | null) => (e: React.DragEvent) => {
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", id);
-    setDrag({ kind: "shape", id, fromLayerId });
-  };
-
-  const hintClass = (active: boolean) =>
-    active ? "border-t-2 border-brand" : "border-t-2 border-transparent";
-
-  const renderShapeRow = (
-    sid: string,
-    fromLayerId: string | null,
-    dropZone: Extract<DropHint, { beforeId: string | null }>,
-  ) => {
-    const s = shapeMap.get(sid);
-    if (!s) return null;
-    const sel = selectedShapeIds.includes(sid);
-    const isHint =
-      dropHint &&
-      dropHint.kind === dropZone.kind &&
-      ("layerId" in dropHint
-        ? "layerId" in dropZone && dropHint.layerId === dropZone.layerId
-        : true) &&
-      dropHint.beforeId === sid;
-    return (
-      <div
-        key={sid}
-        className={`${hintClass(!!isHint)}`}
-        draggable
-        onDragStart={onDragStartShape(sid, fromLayerId)}
-        onDragEnd={clearDrag}
-        onDragOver={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          if (!drag || drag.kind !== "shape") return;
-          setDropHint({ ...dropZone, beforeId: sid });
-        }}
-        onDrop={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          commitDrop();
-        }}
-      >
-        <button
-          type="button"
-          className={`flex w-full items-center gap-1 rounded px-1 py-0.5 text-left text-[11px] ${
-            sel ? "bg-neutral-200" : "hover:bg-neutral-50"
-          }`}
-          onClick={(e) => onSelectShape(sid, e)}
-        >
-          <span className="cursor-grab text-neutral-400 active:cursor-grabbing">
-            <GripIcon />
-          </span>
-          <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ background: s.fill }} />
-          <span className="truncate text-neutral-600">{shapeLabel(s)}</span>
-        </button>
-      </div>
-    );
-  };
-
-  const renderLayerRow = (layerId: string, indent: boolean, inGroupId: string | null) => {
-    const layer = tree.layers.find((l) => l.id === layerId);
-    if (!layer) return null;
-    const selected = selectedLayerIds.includes(layer.id);
-    const active = tree.activeLayerId === layer.id;
-    const shapesDisplay = [...layer.shapeIds].reverse();
-    const collapsed = !!layer.collapsed;
-
-    const isRootHint =
-      dropHint?.kind === "root" && dropHint.beforeId === layer.id && !inGroupId;
-    const isGroupHint =
-      dropHint?.kind === "group" &&
-      inGroupId &&
-      dropHint.groupId === inGroupId &&
-      dropHint.beforeId === layer.id;
+  const renderNode = (node: ManualNode, depth: number): React.ReactNode => {
+    const isContainer = node.kind === "container";
+    const selected = selectedIds.includes(node.id);
+    const active = isContainer && activeContainerId === node.id;
+    const vis = isNodeVisible(project, node.id);
+    const locked = isNodeLocked(project, node.id);
+    const collapsed = isContainer && !!node.collapsed;
+    const showTop = hint?.targetId === node.id && hint.pos === "before";
+    const showBottom = hint?.targetId === node.id && hint.pos === "after";
+    const showInto = hint?.targetId === node.id && hint.pos === "into";
+    const label = nodeLabel(node, shapeMap);
+    const leafShape = node.kind === "leaf" ? shapeMap.get(node.shapeId) : undefined;
 
     return (
-      <div key={layer.id} className={indent ? "ml-3 border-l border-neutral-200 pl-1" : ""}>
+      <div key={node.id}>
+        <div className={showTop ? "border-t-2 border-brand" : "border-t-2 border-transparent"} />
         <div
-          className={`${hintClass(!!(isRootHint || isGroupHint))}`}
-          draggable
-          onDragStart={onDragStartNode(layer.id)}
+          draggable={!locked}
+          onDragStart={(e) => {
+            if (locked) return;
+            e.dataTransfer.effectAllowed = "move";
+            e.dataTransfer.setData("text/plain", node.id);
+            setDragId(node.id);
+          }}
           onDragEnd={clearDrag}
           onDragOver={(e) => {
+            if (!dragId || dragId === node.id) return;
+            const pos = posFromEvent(e, isContainer);
+            if (!dropAllowed(dragId, node.id, pos)) return;
             e.preventDefault();
             e.stopPropagation();
-            if (!drag || drag.kind !== "node") return;
-            if (drag.id === layer.id) return;
-            if (inGroupId) {
-              setDropHint({ kind: "group", groupId: inGroupId, beforeId: layer.id });
-            } else {
-              setDropHint({ kind: "root", beforeId: layer.id });
-            }
+            setHint({ targetId: node.id, pos });
           }}
           onDrop={(e) => {
             e.preventDefault();
             e.stopPropagation();
             commitDrop();
           }}
+          className={showInto ? "rounded ring-1 ring-brand" : ""}
         >
           <div
             className={`flex items-center gap-0.5 rounded px-1 py-0.5 text-xs ${
               selected ? "bg-brand-soft ring-1 ring-brand" : "hover:bg-neutral-100"
-            } ${active ? "font-semibold" : ""}`}
+            } ${active ? "font-semibold" : ""} ${locked ? "opacity-70" : ""}`}
+            style={{ paddingLeft: depth * 12 + 4 }}
             onClick={(e) => {
-              onSelectLayer(layer.id, e);
-              onSetActiveLayer(layer.id);
+              onSelectNode(node.id, e);
+              if (isContainer) onSetActiveContainer(node.id);
             }}
-            onDoubleClick={() => onRenameLayer(layer.id)}
+            onDoubleClick={() => onRenameNode(node.id)}
           >
-            <span className="cursor-grab text-neutral-400 active:cursor-grabbing">
-              <GripIcon />
-            </span>
-            {layer.shapeIds.length > 0 ? (
+            {isContainer && node.children.length > 0 ? (
               <button
                 type="button"
                 className="w-4 shrink-0 text-neutral-500"
                 onClick={(e) => {
                   e.stopPropagation();
-                  onToggleLayerCollapsed(layer.id);
+                  onToggleCollapsed(node.id);
                 }}
                 title={collapsed ? "Expand" : "Collapse"}
               >
                 {collapsed ? "▸" : "▾"}
               </button>
             ) : (
-              <span className="w-4" />
+              <span className="w-4 shrink-0" />
             )}
             <button
               type="button"
               className="rounded p-0.5 text-neutral-500 hover:bg-neutral-200"
               onClick={(e) => {
                 e.stopPropagation();
-                onToggleLayerVisible(layer.id);
+                onToggleVisible(node.id);
               }}
-              title={layer.visible ? "Hide" : "Show"}
+              title={node.visible ? "Hide" : "Show"}
             >
-              <EyeIcon on={layer.visible} />
+              <EyeIcon on={node.visible} />
             </button>
             <button
               type="button"
-              className={`rounded p-0.5 hover:bg-neutral-200 ${layer.locked ? "text-ink" : "text-neutral-400"}`}
+              className={`rounded p-0.5 hover:bg-neutral-200 ${node.locked ? "text-ink" : "text-neutral-400"}`}
               onClick={(e) => {
                 e.stopPropagation();
-                onToggleLayerLocked(layer.id);
+                onToggleLocked(node.id);
               }}
-              title={layer.locked ? "Unlock position" : "Lock position"}
+              title={node.locked ? "Unlock" : "Lock"}
             >
-              <LockIcon on={layer.locked} />
+              <LockIcon on={node.locked} />
             </button>
-            <span className="min-w-0 flex-1 truncate" title={layer.name}>
-              {layer.name}
+            {leafShape ? (
+              <span
+                className="ml-0.5 h-2.5 w-2.5 shrink-0 rounded-sm ring-1 ring-black/10"
+                style={{ background: leafShape.fill }}
+              />
+            ) : (
+              <span className="ml-0.5 shrink-0 text-neutral-400" title="Group">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+                </svg>
+              </span>
+            )}
+            <span className={`min-w-0 flex-1 truncate ${vis ? "" : "text-neutral-400 line-through"}`} title={label}>
+              {label}
               {active ? <span className="ml-1 text-[10px] font-normal text-brand">active</span> : null}
             </span>
           </div>
         </div>
-
-        {!collapsed && (
-          <div
-            className="ml-2"
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!drag || drag.kind !== "shape") return;
-              // Drop at end of this layer's display list (bottom = model front)
-              setDropHint({ kind: "layerShapes", layerId: layer.id, beforeId: null });
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              commitDrop();
-            }}
-          >
-            {shapesDisplay.map((sid) =>
-              renderShapeRow(sid, layer.id, {
-                kind: "layerShapes",
-                layerId: layer.id,
-                beforeId: sid,
-              }),
-            )}
-            {dropHint?.kind === "layerShapes" &&
-              dropHint.layerId === layer.id &&
-              dropHint.beforeId === null &&
-              drag?.kind === "shape" && <div className="border-t-2 border-brand" />}
-          </div>
+        {isContainer && !collapsed && (
+          <div>{[...node.children].reverse().map((c) => renderNode(c, depth + 1))}</div>
         )}
+        {showBottom && <div className="border-t-2 border-brand" />}
       </div>
     );
   };
 
-  const endRootHint =
-    dropHint?.kind === "root" && dropHint.beforeId === null && drag?.kind === "node";
+  const rootDisplay = [...tree.root].reverse();
 
   return (
     <div>
       <div className="mb-2 flex flex-wrap gap-1">
         <button
           type="button"
-          onClick={onNewLayer}
+          onClick={onNewContainer}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300"
-          title="New layer"
+          title="New group"
         >
-          + Layer
+          + Group
         </button>
         <button
           type="button"
           onClick={onGroup}
           disabled={!canGroup}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300 disabled:opacity-40"
-          title="Group selection"
+          title="Group selection (⌘G)"
         >
           Group
         </button>
         <button
           type="button"
           onClick={onDeleteNodes}
-          disabled={selectedLayerIds.length === 0}
+          disabled={selectedIds.length === 0}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300 disabled:opacity-40"
-          title="Delete selected layers/groups (shapes kept)"
+          title="Ungroup selected groups (shapes kept)"
         >
-          Delete
+          Ungroup
         </button>
         <button
           type="button"
@@ -486,168 +342,31 @@ export default function LayersPanel({
       </div>
 
       <div
-        className="max-h-64 space-y-0.5 overflow-y-auto rounded border border-neutral-200 bg-neutral-50 p-1"
+        className="max-h-72 space-y-0.5 overflow-y-auto rounded border border-neutral-200 bg-neutral-50 p-1"
         onDragOver={(e) => {
-          e.preventDefault();
-          if (!drag || drag.kind !== "node") return;
-          // Empty space at bottom of list → append (display bottom = model front)
+          // Empty space at bottom → drop at root back (model index 0)
+          if (!dragId) return;
           if (e.currentTarget === e.target) {
-            setDropHint({ kind: "root", beforeId: null });
+            e.preventDefault();
           }
         }}
         onDrop={(e) => {
-          e.preventDefault();
-          commitDrop();
+          if (dragId && e.currentTarget === e.target) {
+            e.preventDefault();
+            onMoveNode(dragId, null, 0);
+            clearDrag();
+          }
         }}
       >
-        {tree.rootOrder.length === 0 && ungrouped.length === 0 && (
+        {tree.root.length === 0 && (
           <div className="px-2 py-3 text-center text-[11px] text-neutral-400">
-            No layers yet. Draw freely, or create a layer to organize & lock.
+            No shapes yet. Draw freely, or create a group to organize & lock.
           </div>
         )}
-
-        {rootDisplay.map((id) => {
-          const group = tree.groups.find((g) => g.id === id);
-          if (group) {
-            const selected = selectedLayerIds.includes(group.id);
-            const isRootHint = dropHint?.kind === "root" && dropHint.beforeId === group.id;
-            const isInto =
-              dropHint?.kind === "intoGroup" && dropHint.groupId === group.id && drag?.kind === "node";
-            const kidsDisplay = [...group.childIds].reverse();
-            return (
-              <div key={group.id}>
-                <div
-                  className={`${hintClass(!!isRootHint)} ${isInto ? "ring-1 ring-brand" : ""}`}
-                  draggable
-                  onDragStart={onDragStartNode(group.id)}
-                  onDragEnd={clearDrag}
-                  onDragOver={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (!drag || drag.kind !== "node") return;
-                    if (drag.id === group.id) return;
-                    const layer = tree.layers.find((l) => l.id === drag.id);
-                    if (layer) {
-                      // Hovering group header with a layer → nest into group
-                      setDropHint({ kind: "intoGroup", groupId: group.id });
-                    } else {
-                      setDropHint({ kind: "root", beforeId: group.id });
-                    }
-                  }}
-                  onDrop={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    commitDrop();
-                  }}
-                >
-                  <div
-                    className={`flex items-center gap-0.5 rounded px-1 py-0.5 text-xs ${
-                      selected ? "bg-brand-soft ring-1 ring-brand" : "hover:bg-neutral-100"
-                    }`}
-                    onClick={(e) => onSelectLayer(group.id, e)}
-                    onDoubleClick={() => onRenameGroup(group.id)}
-                  >
-                    <span className="cursor-grab text-neutral-400 active:cursor-grabbing">
-                      <GripIcon />
-                    </span>
-                    <button
-                      type="button"
-                      className="w-4 text-neutral-500"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleGroupCollapsed(group.id);
-                      }}
-                    >
-                      {group.collapsed ? "▸" : "▾"}
-                    </button>
-                    <button
-                      type="button"
-                      className="rounded p-0.5 text-neutral-500 hover:bg-neutral-200"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleGroupVisible(group.id);
-                      }}
-                    >
-                      <EyeIcon on={group.visible} />
-                    </button>
-                    <button
-                      type="button"
-                      className={`rounded p-0.5 hover:bg-neutral-200 ${group.locked ? "text-ink" : "text-neutral-400"}`}
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onToggleGroupLocked(group.id);
-                      }}
-                    >
-                      <LockIcon on={group.locked} />
-                    </button>
-                    <span className="truncate font-medium">{group.name}</span>
-                  </div>
-                </div>
-                {!group.collapsed && (
-                  <div
-                    onDragOver={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      if (!drag || drag.kind !== "node") return;
-                      if (!tree.layers.some((l) => l.id === drag.id)) return;
-                      setDropHint({ kind: "group", groupId: group.id, beforeId: null });
-                    }}
-                    onDrop={(e) => {
-                      e.preventDefault();
-                      e.stopPropagation();
-                      commitDrop();
-                    }}
-                  >
-                    {kidsDisplay.map((lid) => renderLayerRow(lid, true, group.id))}
-                    {dropHint?.kind === "group" &&
-                      dropHint.groupId === group.id &&
-                      dropHint.beforeId === null &&
-                      drag?.kind === "node" && <div className="ml-3 border-t-2 border-brand" />}
-                  </div>
-                )}
-              </div>
-            );
-          }
-          if (groupForLayer(tree, id)) return null;
-          return renderLayerRow(id, false, null);
-        })}
-
-        {endRootHint && <div className="border-t-2 border-brand" />}
-
-        {/* Orphan layers not in rootOrder */}
-        {tree.layers
-          .filter((l) => !groupForLayer(tree, l.id) && !tree.rootOrder.includes(l.id))
-          .map((l) => renderLayerRow(l.id, false, null))}
-
-        {(ungrouped.length > 0 || (drag?.kind === "shape" && dropHint?.kind === "ungrouped")) && (
-          <div
-            className="mt-1 border-t border-neutral-200 pt-1"
-            onDragOver={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!drag || drag.kind !== "shape") return;
-              setDropHint({ kind: "ungrouped", beforeId: null });
-            }}
-            onDrop={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              commitDrop();
-            }}
-          >
-            <div className="px-1 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-neutral-400">
-              Ungrouped
-            </div>
-            {ungroupedDisplay.map((sid) =>
-              renderShapeRow(sid, null, { kind: "ungrouped", beforeId: sid }),
-            )}
-            {dropHint?.kind === "ungrouped" && dropHint.beforeId === null && drag?.kind === "shape" && (
-              <div className="border-t-2 border-brand" />
-            )}
-          </div>
-        )}
+        {rootDisplay.map((n) => renderNode(n, 0))}
       </div>
       <p className="mt-1 text-[10px] text-neutral-400">
-        Drag to reorder (top = front) · ⌘/Ctrl+click multi · lock = no drag
+        Drag to reorder (top = front) · drop onto a group to nest · ⌘/Ctrl+click multi · lock = no drag
       </p>
     </div>
   );

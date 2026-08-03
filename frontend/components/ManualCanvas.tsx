@@ -5,6 +5,7 @@ import {
   bendEdge,
   bendHitRadius,
   computeExportLayout,
+  contentBBox,
   defaultFill,
   edgeHitRadius,
   ellipseVertsFromBox,
@@ -76,6 +77,7 @@ type DragState = {
     | "rect"
     | "ellipse"
     | "polyPlace"
+    | "rotate"
     | "badgeMove"
     | "badgeResize";
   startClient: { x: number; y: number };
@@ -83,6 +85,9 @@ type DragState = {
   origVerts: PolyVert[];
   vIdx: number;
   handleOut?: Point;
+  /** Rotation pivot (content space) + pointer angle at drag start (radians). */
+  rotCenter?: Point;
+  rotStart?: number;
   /** Snapshot of badge layout at drag start (export space). */
   origBadge?: ManualBadgeLayout;
 };
@@ -102,6 +107,25 @@ function translateVerts(verts: PolyVert[], dx: number, dy: number): PolyVert[] {
       : undefined,
   }));
 }
+
+/** Rotate anchors + bezier handles by `ang` (radians) around (cx, cy). */
+function rotateVerts(verts: PolyVert[], cx: number, cy: number, ang: number): PolyVert[] {
+  const cos = Math.cos(ang);
+  const sin = Math.sin(ang);
+  const rot = (p: Point): Point => {
+    const x = p[0] - cx;
+    const y = p[1] - cy;
+    return [cx + x * cos - y * sin, cy + x * sin + y * cos];
+  };
+  return verts.map((v) => ({
+    p: rot(v.p),
+    handleOut: v.handleOut ? rot(v.handleOut) : undefined,
+  }));
+}
+
+/** Custom rotate cursor (curved arrow) for the rotation handle + active drag. */
+const ROTATE_CURSOR =
+  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 1 1-2.64-6.36'/><path d='M21 3v5h-5'/></svg>\") 12 12, crosshair";
 
 export default function ManualCanvas({
   project,
@@ -440,6 +464,15 @@ export default function ManualCanvas({
       let h = toContent(e.clientX, e.clientY);
       if (!precise) h = snapPoint(h, selectedId);
       setLiveEdit({ id: selectedId, verts: bendEdge(dstate.origVerts, dstate.vIdx, h) });
+    } else if (dstate.mode === "rotate" && selectedId && dstate.rotCenter && dstate.rotStart != null) {
+      const [cx, cy] = dstate.rotCenter;
+      const cur = toContent(e.clientX, e.clientY);
+      let ang = Math.atan2(cur[1] - cy, cur[0] - cx) - dstate.rotStart;
+      if (shiftHeld.current) {
+        const step = Math.PI / 12; // snap to 15°
+        ang = Math.round(ang / step) * step;
+      }
+      setLiveEdit({ id: selectedId, verts: rotateVerts(dstate.origVerts, cx, cy, ang) });
     } else if ((dstate.mode === "badgeMove" || dstate.mode === "badgeResize") && dstate.origBadge && onUpdateBadgeLayout) {
       const cur = toContent(e.clientX, e.clientY);
       const layout = computeExportLayout(project);
@@ -506,8 +539,10 @@ export default function ManualCanvas({
       dstate.mode === "move" ||
       dstate.mode === "vertex" ||
       dstate.mode === "bezier" ||
-      dstate.mode === "bend"
+      dstate.mode === "bend" ||
+      dstate.mode === "rotate"
     ) {
+      if (dstate.mode === "rotate") document.body.style.cursor = "";
       const committed = liveRef.current;
       if (committed) commitVerts(committed.id, committed.verts);
       setLiveEdit(null);
@@ -698,6 +733,33 @@ export default function ManualCanvas({
     moved.current = false;
   };
 
+  const beginRotate = (e: MouseEvent, verts: PolyVert[], id: string) => {
+    e.stopPropagation();
+    e.preventDefault();
+    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
+    if (verts.length === 0) return;
+    let cx = 0;
+    let cy = 0;
+    for (const v of verts) {
+      cx += v.p[0];
+      cy += v.p[1];
+    }
+    cx /= verts.length;
+    cy /= verts.length;
+    const cur = toContent(e.clientX, e.clientY);
+    drag.current = {
+      mode: "rotate",
+      startClient: { x: e.clientX, y: e.clientY },
+      startContent: [cx, cy],
+      origVerts: cloneVerts(verts),
+      vIdx: -1,
+      rotCenter: [cx, cy],
+      rotStart: Math.atan2(cur[1] - cy, cur[0] - cx),
+    };
+    document.body.style.cursor = ROTATE_CURSOR;
+    moved.current = false;
+  };
+
   const uiSw = 2 / view.scale;
   const strokeW = tenantStroke.width;
   const shellStrokeW = shellStroke.width;
@@ -724,11 +786,16 @@ export default function ManualCanvas({
   const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
 
   // Expand viewBox so the floor badge (often in the export gutter) stays visible.
+  // With no background image (bg dims 0), frame the drawn content instead so tabs
+  // without a denah (e.g. imported after a quota-driven bg drop) still render.
   const vbPad = badgeSrcR + 24;
+  const bbox = bg.width && bg.height ? null : contentBBox(project);
+  const contentW = bbox ? bbox.x1 + 24 : 0;
+  const contentH = bbox ? bbox.y1 + 24 : 0;
   const vbMinX = Math.min(0, badgeSrcCx - vbPad);
   const vbMinY = Math.min(0, badgeSrcCy - vbPad);
-  const vbMaxX = Math.max(bg.width || 1, badgeSrcCx + vbPad);
-  const vbMaxY = Math.max(bg.height || 1, badgeSrcCy + vbPad);
+  const vbMaxX = Math.max(bg.width || 1, contentW, badgeSrcCx + vbPad);
+  const vbMaxY = Math.max(bg.height || 1, contentH, badgeSrcCy + vbPad);
   const vbW = Math.max(1, vbMaxX - vbMinX);
   const vbH = Math.max(1, vbMaxY - vbMinY);
 
@@ -798,6 +865,12 @@ export default function ManualCanvas({
         onMouseLeave={() => {
           if (drag.current?.mode === "polyPlace") {
             commitPolyPlace(drag.current.startContent, undefined, 0);
+          }
+          if (drag.current?.mode === "rotate") {
+            const committed = liveRef.current;
+            if (committed) commitVerts(committed.id, committed.verts);
+            setLiveEdit(null);
+            document.body.style.cursor = "";
           }
           drag.current = null;
         }}
@@ -949,6 +1022,45 @@ export default function ManualCanvas({
                 />
               </g>
             ))}
+
+          {/* rotate handle (real shapes only, above the bbox) */}
+          {tool === "select" &&
+            selectedShape &&
+            selectedVerts &&
+            selectedVerts.length > 0 &&
+            !isShapeLocked(project, selectedShape.id) &&
+            (() => {
+              const xs = selectedVerts.map((v) => v.p[0]);
+              const ys = selectedVerts.map((v) => v.p[1]);
+              const hx = (Math.min(...xs) + Math.max(...xs)) / 2;
+              const topY = Math.min(...ys);
+              const hy = topY - 26 / view.scale;
+              return (
+                <g>
+                  <line
+                    x1={hx}
+                    y1={topY}
+                    x2={hx}
+                    y2={hy}
+                    stroke={BRAND}
+                    strokeWidth={uiSw * 0.7}
+                    opacity={0.6}
+                    pointerEvents="none"
+                  />
+                  <circle
+                    cx={hx}
+                    cy={hy}
+                    r={handleR * 1.15}
+                    fill="#fff"
+                    stroke={BRAND}
+                    strokeWidth={uiSw}
+                    style={{ cursor: ROTATE_CURSOR }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => beginRotate(e, selectedVerts, selectedShape.id)}
+                  />
+                </g>
+              );
+            })()}
 
           {rectDraft &&
             (drag.current?.mode === "ellipse" || tool === "ellipse" ? (

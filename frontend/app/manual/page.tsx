@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import Uploader from "@/components/Uploader";
 import LayersPanel from "@/components/LayersPanel";
+import ExportPreview from "@/components/ExportPreview";
 import ManualCanvas, { type Tool } from "@/components/ManualCanvas";
 import type { Category, Point } from "@/lib/types";
 import { CATEGORY_LABEL } from "@/lib/types";
@@ -19,13 +20,14 @@ import {
   PNG_SCALE_MAX,
   PNG_SCALE_MIN,
   activeProject,
-  assignShapeToActiveLayer,
   computeExportLayout,
-  createLayer,
+  createContainer,
   defaultBadgeLayout,
   defaultFill,
-  deleteLayerNodes,
+  deleteContainers,
+  displayRowOrder,
   emitManualSvg,
+  findNode,
   getBadgeLayout,
   getDrawOpacity,
   getExportNormalizedWidth,
@@ -33,32 +35,29 @@ import {
   getPngScale,
   getShellStroke,
   getStroke,
-  groupSelection,
+  groupNodes,
+  insertLeafForShape,
   isManualProject,
   isManualWorkspace,
   loadWorkspace,
   makeTab,
-  moveLayer,
-  moveShape,
+  moveNode,
   newProject,
   newShapeId,
   newWorkspace,
-  patchGroup,
-  patchLayer,
-  removeShapeFromLayers,
+  nodeIdForShape,
+  patchNode,
+  removeLeafForShape,
   removeVert,
-  reorderUngrouped,
   saveWorkspace,
-  setActiveLayer,
+  setActiveContainer,
   setAllCollapsed,
-  setRootOrder,
+  shapeIdForNode,
   shapeVerts,
   shellVertsOf,
   suggestNextFloor,
   syncShapeFromVerts,
-  ungroupedShapeIds,
   SHELL_ID,
-  type LayerMoveTarget,
   type ManualBadgeLayout,
   type ManualProject,
   type ManualShape,
@@ -155,9 +154,10 @@ export default function ManualPage() {
   const [drawCat, setDrawCat] = useState<Category>("fnb");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedVertIndex, setSelectedVertIndex] = useState<number | null>(null);
-  const [selectedLayerIds, setSelectedLayerIds] = useState<string[]>([]);
-  const [selectedShapeIds, setSelectedShapeIds] = useState<string[]>([]);
+  // Selected tree-node ids (containers + leaves) — mirrors the panel selection.
+  const [selectedNodeIds, setSelectedNodeIds] = useState<string[]>([]);
   const [layersOpen, setLayersOpen] = useState(true);
+  const [previewOpen, setPreviewOpen] = useState(false);
   const [snap, setSnap] = useState(true);
   const [gridSize, setGridSize] = useState(8);
   const [error, setError] = useState<string | null>(null);
@@ -214,8 +214,7 @@ export default function ManualPage() {
   const resetTabLocalUi = useCallback(() => {
     setSelectedId(null);
     setSelectedVertIndex(null);
-    setSelectedLayerIds([]);
-    setSelectedShapeIds([]);
+    setSelectedNodeIds([]);
     setFile(null);
     setTool("select");
     if (editorHostRef.current) editorHostRef.current.scrollTop = 0;
@@ -336,9 +335,8 @@ export default function ManualPage() {
 
   const addShape = useCallback(
     (s: ManualShape) => {
-      updateActive((p) => assignShapeToActiveLayer({ ...p, shapes: [...p.shapes, s] }, s.id));
+      updateActive((p) => insertLeafForShape({ ...p, shapes: [...p.shapes, s] }, s.id));
       setSelectedId(s.id);
-      setSelectedShapeIds([s.id]);
       setSelectedVertIndex(null);
       setTool("select");
     },
@@ -368,12 +366,19 @@ export default function ManualPage() {
     [updateActive],
   );
 
-  const selectId = useCallback((id: string | null) => {
-    setSelectedId(id);
-    setSelectedVertIndex(null);
-    if (id && id !== SHELL_ID) setSelectedShapeIds([id]);
-    else setSelectedShapeIds([]);
-  }, []);
+  const selectId = useCallback(
+    (id: string | null) => {
+      setSelectedId(id);
+      setSelectedVertIndex(null);
+      if (id && id !== SHELL_ID && project) {
+        const nid = nodeIdForShape(project, id);
+        setSelectedNodeIds(nid ? [nid] : []);
+      } else {
+        setSelectedNodeIds([]);
+      }
+    },
+    [project],
+  );
 
   const deleteVert = useCallback(() => {
     if (!project || selectedId == null || selectedVertIndex == null) return;
@@ -410,13 +415,10 @@ export default function ManualPage() {
     }
     if (!confirm("Delete this shape?")) return;
     updateActive((p) =>
-      removeShapeFromLayers(
-        { ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) },
-        selectedId,
-      ),
+      removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }, selectedId),
     );
     setSelectedId(null);
-    setSelectedShapeIds([]);
+    setSelectedNodeIds([]);
     setSelectedVertIndex(null);
   }, [selectedId, updateActive]);
 
@@ -472,129 +474,117 @@ export default function ManualPage() {
   const setShellStrokeWidth = (width: number) =>
     updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), width } }));
 
-  // ---- layers ----
-  // Display order (front → back) for Shift+click range selection
-  const panelRows = useMemo(() => {
-    if (!project) return [] as string[];
-    const tree = getLayerTree(project);
-    const rows: string[] = [];
-    for (const id of [...tree.rootOrder].reverse()) {
-      rows.push(id);
-      const g = tree.groups.find((x) => x.id === id);
-      if (g && !g.collapsed) rows.push(...[...g.childIds].reverse());
-    }
-    for (const l of tree.layers) {
-      if (!tree.rootOrder.includes(l.id) && !tree.groups.some((g) => g.childIds.includes(l.id))) {
-        rows.push(l.id);
-      }
-    }
-    return rows;
-  }, [project]);
+  // ---- layers (recursive node tree) ----
+  const activeContainerId = useMemo(
+    () => getLayerTree(project).activeContainerId,
+    [project],
+  );
+  const canGroup = selectedNodeIds.length >= 1;
 
-  const onSelectLayerRow = useCallback(
+  // Flat display order (front → back) for Shift+click range selection.
+  const panelRows = useMemo(() => (project ? displayRowOrder(project) : []), [project]);
+
+  const onSelectNode = useCallback(
     (id: string, e: React.MouseEvent) => {
       if (!project) return;
-      const rows = panelRows;
+      const syncCanvas = (nodeId: string | null) => {
+        const sid = nodeId ? shapeIdForNode(project, nodeId) : null;
+        setSelectedId(sid);
+        setSelectedVertIndex(null);
+      };
       if (e.metaKey || e.ctrlKey) {
-        setSelectedLayerIds((prev) =>
+        setSelectedNodeIds((prev) =>
           prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
         );
+        syncCanvas(id);
         return;
       }
-      if (e.shiftKey && selectedLayerIds.length > 0) {
-        const last = selectedLayerIds[selectedLayerIds.length - 1];
+      if (e.shiftKey && selectedNodeIds.length > 0) {
+        const rows = panelRows;
+        const last = selectedNodeIds[selectedNodeIds.length - 1];
         const a = rows.indexOf(last);
         const b = rows.indexOf(id);
         if (a >= 0 && b >= 0) {
           const [lo, hi] = a < b ? [a, b] : [b, a];
-          setSelectedLayerIds(rows.slice(lo, hi + 1));
+          setSelectedNodeIds(rows.slice(lo, hi + 1));
+          syncCanvas(id);
           return;
         }
       }
-      setSelectedLayerIds([id]);
-      setSelectedShapeIds([]);
+      setSelectedNodeIds([id]);
+      syncCanvas(id);
     },
-    [panelRows, project, selectedLayerIds],
+    [panelRows, project, selectedNodeIds],
   );
 
-  const onSelectShapeRow = useCallback((id: string, e: React.MouseEvent) => {
-    if (!project) return;
-    const ungrouped = ungroupedShapeIds(project);
-    if (e.metaKey || e.ctrlKey) {
-      setSelectedShapeIds((prev) =>
-        prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
-      );
-      setSelectedId(id);
-      return;
-    }
-    if (e.shiftKey && selectedShapeIds.length > 0) {
-      const list = ungrouped.length ? ungrouped : project.shapes.map((s) => s.id);
-      const last = selectedShapeIds[selectedShapeIds.length - 1];
-      const a = list.indexOf(last);
-      const b = list.indexOf(id);
-      if (a >= 0 && b >= 0) {
-        const [lo, hi] = a < b ? [a, b] : [b, a];
-        setSelectedShapeIds(list.slice(lo, hi + 1));
-        setSelectedId(id);
-        return;
-      }
-    }
-    setSelectedShapeIds([id]);
-    setSelectedId(id);
-    setSelectedLayerIds([]);
-    setSelectedVertIndex(null);
-  }, [project, selectedShapeIds]);
-
-  const doNewLayer = () => updateActive((p) => createLayer(p));
+  const doNewContainer = () =>
+    updateActive((p) => createContainer(p, activeContainerId ?? null));
   const doGroup = () => {
-    if (!project) return;
-    const ungroupedSel = selectedShapeIds.filter((id) => ungroupedShapeIds(project).includes(id));
-    const layerIds = selectedLayerIds.filter((id) =>
-      getLayerTree(project).layers.some((l) => l.id === id),
-    );
-    updateActive((p) => groupSelection(p, layerIds, ungroupedSel));
-    setSelectedLayerIds([]);
-    setSelectedShapeIds([]);
+    if (!project || selectedNodeIds.length < 1) return;
+    updateActive((p) => groupNodes(p, selectedNodeIds));
+    setSelectedNodeIds([]);
   };
-  const doDeleteLayerNodes = () => {
-    if (!selectedLayerIds.length) return;
-    if (!confirm("Remove selected layers/groups? Shapes stay as ungrouped.")) return;
-    updateActive((p) => deleteLayerNodes(p, selectedLayerIds));
-    setSelectedLayerIds([]);
+  const doDeleteNodes = () => {
+    if (!project) return;
+    const containers = selectedNodeIds.filter((id) => {
+      const f = findNode(getLayerTree(project), id);
+      return f?.node.kind === "container";
+    });
+    if (!containers.length) return;
+    if (!confirm("Ungroup selected group(s)? Their contents stay, the group is removed.")) return;
+    updateActive((p) => deleteContainers(p, containers));
+    setSelectedNodeIds([]);
   };
 
-  const onReorderRoot = useCallback(
-    (displayOrder: string[]) => {
-      updateActive((p) => setRootOrder(p, [...displayOrder].reverse()));
+  const onMoveNodeCb = useCallback(
+    (id: string, parentId: string | null, indexModel: number) => {
+      updateActive((p) => moveNode(p, id, parentId, indexModel));
     },
     [updateActive],
   );
-  const onMoveLayerCb = useCallback(
-    (layerId: string, target: LayerMoveTarget, indexModel: number) => {
-      updateActive((p) => moveLayer(p, layerId, target, indexModel));
-    },
-    [updateActive],
-  );
-  const onMoveShapeCb = useCallback(
-    (shapeId: string, targetLayerId: string | null, indexModel: number) => {
-      updateActive((p) => moveShape(p, shapeId, targetLayerId, indexModel));
-    },
-    [updateActive],
-  );
-  const onReorderUngroupedCb = useCallback(
-    (displayOrder: string[]) => {
-      updateActive((p) => reorderUngrouped(p, [...displayOrder].reverse()));
-    },
-    [updateActive],
-  );
-  const onToggleLayerCollapsed = useCallback(
+  const onToggleNodeVisible = useCallback(
     (id: string) => {
       updateActive((p) => {
-        const l = getLayerTree(p).layers.find((x) => x.id === id);
-        if (!l) return p;
-        return patchLayer(p, id, { collapsed: !l.collapsed });
+        const f = findNode(getLayerTree(p), id);
+        if (!f) return p;
+        return patchNode(p, id, { visible: !f.node.visible });
       });
     },
+    [updateActive],
+  );
+  const onToggleNodeLocked = useCallback(
+    (id: string) => {
+      updateActive((p) => {
+        const f = findNode(getLayerTree(p), id);
+        if (!f) return p;
+        return patchNode(p, id, { locked: !f.node.locked });
+      });
+    },
+    [updateActive],
+  );
+  const onToggleNodeCollapsed = useCallback(
+    (id: string) => {
+      updateActive((p) => {
+        const f = findNode(getLayerTree(p), id);
+        if (!f || f.node.kind !== "container") return p;
+        return patchNode(p, id, { collapsed: !f.node.collapsed });
+      });
+    },
+    [updateActive],
+  );
+  const onRenameNode = useCallback(
+    (id: string) => {
+      if (!project) return;
+      const f = findNode(getLayerTree(project), id);
+      if (!f) return;
+      const current = f.node.kind === "container" ? f.node.name : f.node.name ?? "";
+      const name = window.prompt("Name", current);
+      if (name != null && name.trim()) updateActive((p) => patchNode(p, id, { name: name.trim() }));
+    },
+    [project, updateActive],
+  );
+  const onSetActiveContainer = useCallback(
+    (id: string | null) => updateActive((p) => setActiveContainer(p, id)),
     [updateActive],
   );
   const onCollapseAll = useCallback(
@@ -1171,6 +1161,13 @@ export default function ManualPage() {
                 PNG {exportPreview.pngW}×{exportPreview.pngH}
               </div>
             )}
+            <button
+              onClick={() => setPreviewOpen(true)}
+              disabled={!project || !project.shapes.length}
+              className="mb-2 w-full rounded border border-brand px-2 py-1.5 text-sm font-medium text-brand hover:bg-brand-soft disabled:opacity-40"
+            >
+              Preview export…
+            </button>
             <div className="flex gap-2">
               <button onClick={doExportSvg} disabled={!project || !project.shapes.length}
                 className="flex-1 rounded bg-brand px-2 py-1.5 text-sm text-white hover:bg-brand-hover disabled:opacity-40">Export SVG</button>
@@ -1271,7 +1268,7 @@ export default function ManualPage() {
           </div>
 
           <div ref={editorHostRef} className="relative min-h-0 flex-1 overflow-hidden">
-            {hasImage && project ? (
+            {project && (hasImage || project.shapes.length > 0 || project.shell) ? (
               <div className="absolute inset-0">
                 <ManualCanvas
                   key={workspace?.activeTabId ?? "tab"}
@@ -1328,51 +1325,19 @@ export default function ManualPage() {
                     <div className="p-2">
                       <LayersPanel
                         project={project}
-                        selectedLayerIds={selectedLayerIds}
-                        selectedShapeIds={selectedShapeIds}
-                        onSelectLayer={onSelectLayerRow}
-                        onSelectShape={onSelectShapeRow}
-                        onToggleLayerVisible={(id) => {
-                          const l = getLayerTree(project).layers.find((x) => x.id === id);
-                          if (l) updateActive((p) => patchLayer(p, id, { visible: !l.visible }));
-                        }}
-                        onToggleLayerLocked={(id) => {
-                          const l = getLayerTree(project).layers.find((x) => x.id === id);
-                          if (l) updateActive((p) => patchLayer(p, id, { locked: !l.locked }));
-                        }}
-                        onToggleGroupVisible={(id) => {
-                          const g = getLayerTree(project).groups.find((x) => x.id === id);
-                          if (g) updateActive((p) => patchGroup(p, id, { visible: !g.visible }));
-                        }}
-                        onToggleGroupLocked={(id) => {
-                          const g = getLayerTree(project).groups.find((x) => x.id === id);
-                          if (g) updateActive((p) => patchGroup(p, id, { locked: !g.locked }));
-                        }}
-                        onToggleGroupCollapsed={(id) => {
-                          const g = getLayerTree(project).groups.find((x) => x.id === id);
-                          if (g) updateActive((p) => patchGroup(p, id, { collapsed: !g.collapsed }));
-                        }}
-                        onToggleLayerCollapsed={onToggleLayerCollapsed}
-                        onRenameLayer={(id) => {
-                          const l = getLayerTree(project).layers.find((x) => x.id === id);
-                          if (!l) return;
-                          const name = window.prompt("Layer name", l.name);
-                          if (name != null && name.trim()) updateActive((p) => patchLayer(p, id, { name: name.trim() }));
-                        }}
-                        onRenameGroup={(id) => {
-                          const g = getLayerTree(project).groups.find((x) => x.id === id);
-                          if (!g) return;
-                          const name = window.prompt("Group name", g.name);
-                          if (name != null && name.trim()) updateActive((p) => patchGroup(p, id, { name: name.trim() }));
-                        }}
-                        onNewLayer={doNewLayer}
+                        selectedIds={selectedNodeIds}
+                        activeContainerId={activeContainerId}
+                        canGroup={canGroup}
+                        onSelectNode={onSelectNode}
+                        onToggleVisible={onToggleNodeVisible}
+                        onToggleLocked={onToggleNodeLocked}
+                        onToggleCollapsed={onToggleNodeCollapsed}
+                        onRenameNode={onRenameNode}
+                        onNewContainer={doNewContainer}
                         onGroup={doGroup}
-                        onDeleteNodes={doDeleteLayerNodes}
-                        onSetActiveLayer={(id) => updateActive((p) => setActiveLayer(p, id))}
-                        onReorderRoot={onReorderRoot}
-                        onMoveLayer={onMoveLayerCb}
-                        onMoveShape={onMoveShapeCb}
-                        onReorderUngrouped={onReorderUngroupedCb}
+                        onDeleteNodes={doDeleteNodes}
+                        onSetActiveContainer={onSetActiveContainer}
+                        onMoveNode={onMoveNodeCb}
                         onCollapseAll={onCollapseAll}
                       />
                     </div>
@@ -1383,6 +1348,15 @@ export default function ManualPage() {
           </div>
         </main>
       </div>
+
+      {previewOpen && project && (
+        <ExportPreview
+          project={project}
+          onClose={() => setPreviewOpen(false)}
+          onExportSvg={doExportSvg}
+          onExportPng={doExportPng}
+        />
+      )}
     </div>
   );
 }
