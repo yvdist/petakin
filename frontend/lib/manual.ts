@@ -838,8 +838,16 @@ export function syncShapeFromVerts(verts: PolyVert[]): { verts: PolyVert[]; poin
   return { verts, points: flattenPolyVerts(verts) };
 }
 
-/** Approximate an axis-aligned ellipse from bounding-box corners (a,b). */
-export function ellipseVertsFromBox(a: Point, b: Point, segments = 48): PolyVert[] {
+// Cubic-bezier "magic number" — 4 curves approximate a circle/ellipse to <0.02%.
+const KAPPA = 0.5522847498307936;
+
+/**
+ * Exact axis-aligned ellipse as 4 bezier anchors (top/right/bottom/left) with
+ * symmetric tangent handles. Only 4 draggable points, so a placed ellipse stays
+ * easy to reshape (vs. a 48-gon of anchors). `pathDFromVerts` mirrors each
+ * anchor's `handleOut` into the incoming control point, so the curve is smooth.
+ */
+export function ellipseVertsFromBox(a: Point, b: Point): PolyVert[] {
   const x0 = Math.min(a[0], b[0]);
   const y0 = Math.min(a[1], b[1]);
   const x1 = Math.max(a[0], b[0]);
@@ -849,13 +857,15 @@ export function ellipseVertsFromBox(a: Point, b: Point, segments = 48): PolyVert
   const rx = (x1 - x0) / 2;
   const ry = (y1 - y0) / 2;
   if (rx < 0.5 || ry < 0.5) return [];
-  const n = Math.max(8, Math.round(segments));
-  const verts: PolyVert[] = [];
-  for (let i = 0; i < n; i++) {
-    const t = (i / n) * Math.PI * 2;
-    verts.push({ p: [cx + rx * Math.cos(t), cy + ry * Math.sin(t)] });
-  }
-  return verts;
+  const kx = rx * KAPPA;
+  const ky = ry * KAPPA;
+  // Clockwise from top; handleOut points along the tangent toward the next anchor.
+  return [
+    { p: [cx, cy - ry], handleOut: [cx + kx, cy - ry] }, // top → +x
+    { p: [cx + rx, cy], handleOut: [cx + rx, cy + ky] }, // right → +y
+    { p: [cx, cy + ry], handleOut: [cx - kx, cy + ry] }, // bottom → -x
+    { p: [cx - rx, cy], handleOut: [cx - rx, cy - ky] }, // left → -y
+  ];
 }
 
 export function pathDFromVerts(verts: PolyVert[]): string {
