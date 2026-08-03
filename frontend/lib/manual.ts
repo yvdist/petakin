@@ -1340,6 +1340,11 @@ export function parseManualSvg(svgText: string): ManualProject {
           visible: true,
           children: walk(el),
         });
+      } else if (el.tagName === "g") {
+        // Non-node <g> wrapper (auto/backend export groups units by category,
+        // e.g. <g id="cat-fnb">). Recurse and inline its shapes into the parent
+        // so those units aren't dropped; no container node (keeps Layers flat).
+        out.push(...walk(el));
       } else if (el.tagName === "path" && el.hasAttribute("data-family")) {
         // the fill path (stroke sibling carries data-stroke-for instead — skipped)
         const cat = svgCategory(el.getAttribute("data-family"));
