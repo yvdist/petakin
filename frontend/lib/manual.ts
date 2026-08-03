@@ -30,7 +30,8 @@ export interface ManualStroke {
 }
 
 export interface ManualProject {
-  version: 1;
+  /** 1 = legacy flat layer tree; 2 = recursive node tree. Both load (migrated). */
+  version: 1 | 2;
   floor: string;
   bg: { dataUrl: string; width: number; height: number; opacity: number };
   shapes: ManualShape[];
@@ -67,30 +68,62 @@ export interface ManualBadgeLayout {
   strokeWidth: number;
 }
 
-export interface ManualLayer {
+// ---- Recursive layer tree (v2) ----
+// Every node is either a container (holds ordered children, Figma "group/frame")
+// or a leaf (references a ManualShape by id). Arbitrary nesting. Lock/visibility
+// live on every node and cascade to descendants.
+export type ManualNodeId = string;
+
+interface ManualNodeCommon {
+  id: ManualNodeId;
+  /** Empty on leaves → panel falls back to the shape label. */
+  name: string;
+  locked: boolean;
+  visible: boolean;
+}
+
+export interface ManualContainerNode extends ManualNodeCommon {
+  kind: "container";
+  collapsed?: boolean;
+  /** Ordered back→front (model order); paint/emit iterate as-is, panel reverses. */
+  children: ManualNode[];
+}
+
+export interface ManualLeafNode extends ManualNodeCommon {
+  kind: "leaf";
+  /** References ManualShape.id in project.shapes (geometry stays pure). */
+  shapeId: string;
+}
+
+export type ManualNode = ManualContainerNode | ManualLeafNode;
+
+export interface ManualLayerTree {
+  /** Ordered back→front. */
+  root: ManualNode[];
+  /** Insertion target for newly drawn shapes; null = append at root front. */
+  activeContainerId: ManualNodeId | null;
+}
+
+// ---- legacy (v1) tree shapes, kept only for migration ----
+interface LegacyLayer {
   id: string;
   name: string;
   locked: boolean;
   visible: boolean;
   shapeIds: string[];
-  /** Hide shape list in the layers panel. */
   collapsed?: boolean;
 }
-
-export interface ManualLayerGroup {
+interface LegacyGroup {
   id: string;
   name: string;
   locked: boolean;
   visible: boolean;
-  /** Layer ids only (v1: no nested groups). */
   childIds: string[];
   collapsed?: boolean;
 }
-
-export interface ManualLayerTree {
-  layers: ManualLayer[];
-  groups: ManualLayerGroup[];
-  /** Root order of layer + group ids. */
+interface LegacyLayerTree {
+  layers: LegacyLayer[];
+  groups: LegacyGroup[];
   rootOrder: string[];
   activeLayerId: string | null;
 }
@@ -105,444 +138,503 @@ export const PNG_SCALE_MIN = 1;
 export const PNG_SCALE_MAX = 3;
 
 export function emptyLayerTree(): ManualLayerTree {
-  return { layers: [], groups: [], rootOrder: [], activeLayerId: null };
+  return { root: [], activeContainerId: null };
 }
 
-export function getLayerTree(project: ManualProject | null | undefined): ManualLayerTree {
-  return project?.layerTree ?? emptyLayerTree();
+let nodeIdCounter = 0;
+export function newNodeId(prefix = "n"): string {
+  nodeIdCounter += 1;
+  return `${prefix}${Date.now().toString(36)}${nodeIdCounter}`;
 }
 
-let layerIdCounter = 0;
-export function newLayerId(prefix = "L"): string {
-  layerIdCounter += 1;
-  return `${prefix}${Date.now().toString(36)}${layerIdCounter}`;
+function makeLeaf(shapeId: string): ManualLeafNode {
+  return { id: newNodeId("l"), kind: "leaf", name: "", locked: false, visible: true, shapeId };
 }
 
-function layerById(tree: ManualLayerTree, id: string): ManualLayer | undefined {
-  return tree.layers.find((l) => l.id === id);
+function isLegacyTree(t: unknown): t is LegacyLayerTree {
+  return (
+    !!t &&
+    typeof t === "object" &&
+    Array.isArray((t as LegacyLayerTree).layers) &&
+    Array.isArray((t as LegacyLayerTree).groups) &&
+    Array.isArray((t as LegacyLayerTree).rootOrder)
+  );
 }
 
-function groupById(tree: ManualLayerTree, id: string): ManualLayerGroup | undefined {
-  return tree.groups.find((g) => g.id === id);
-}
-
-/** Layer that currently owns this shape, if any. */
-export function layerForShape(tree: ManualLayerTree, shapeId: string): ManualLayer | null {
-  for (const l of tree.layers) {
-    if (l.shapeIds.includes(shapeId)) return l;
+function collectLeafShapeIds(nodes: ManualNode[], out: Set<string>): void {
+  for (const n of nodes) {
+    if (n.kind === "leaf") out.add(n.shapeId);
+    else collectLeafShapeIds(n.children, out);
   }
-  return null;
 }
 
-export function groupForLayer(tree: ManualLayerTree, layerId: string): ManualLayerGroup | null {
-  for (const g of tree.groups) {
-    if (g.childIds.includes(layerId)) return g;
-  }
-  return null;
-}
-
-export function ungroupedShapeIds(project: ManualProject): string[] {
-  const tree = getLayerTree(project);
-  const assigned = new Set(tree.layers.flatMap((l) => l.shapeIds));
-  return project.shapes.map((s) => s.id).filter((id) => !assigned.has(id));
-}
-
-export function isShapeVisible(project: ManualProject, shapeId: string): boolean {
-  const tree = getLayerTree(project);
-  const layer = layerForShape(tree, shapeId);
-  if (!layer) return true;
-  if (!layer.visible) return false;
-  const g = groupForLayer(tree, layer.id);
-  if (g && !g.visible) return false;
-  return true;
-}
-
-export function isShapeLocked(project: ManualProject, shapeId: string): boolean {
-  const tree = getLayerTree(project);
-  const layer = layerForShape(tree, shapeId);
-  if (!layer) return false;
-  if (layer.locked) return true;
-  const g = groupForLayer(tree, layer.id);
-  return !!(g && g.locked);
-}
-
-/** Paint order: layered (rootOrder) then ungrouped on top. */
-export function orderedShapeIds(project: ManualProject): string[] {
-  const tree = getLayerTree(project);
-  const out: string[] = [];
-  const seen = new Set<string>();
-  const pushLayer = (lid: string) => {
-    const l = layerById(tree, lid);
-    if (!l) return;
-    for (const sid of l.shapeIds) {
-      if (project.shapes.some((s) => s.id === sid) && !seen.has(sid)) {
-        seen.add(sid);
-        out.push(sid);
-      }
-    }
-  };
-  for (const id of tree.rootOrder) {
-    const g = groupById(tree, id);
-    if (g) {
-      for (const lid of g.childIds) pushLayer(lid);
+function pruneDeadLeaves(nodes: ManualNode[], shapeIds: Set<string>): ManualNode[] {
+  const out: ManualNode[] = [];
+  for (const n of nodes) {
+    if (n.kind === "leaf") {
+      if (shapeIds.has(n.shapeId)) out.push(n);
     } else {
-      pushLayer(id);
+      out.push({ ...n, children: pruneDeadLeaves(n.children, shapeIds) });
     }
-  }
-  for (const sid of ungroupedShapeIds(project)) {
-    if (!seen.has(sid)) out.push(sid);
   }
   return out;
 }
 
-export function ensureLayerTree(project: ManualProject): ManualProject {
-  if (project.layerTree) return project;
-  return { ...project, layerTree: emptyLayerTree() };
+function countContainers(nodes: ManualNode[]): number {
+  let c = 0;
+  for (const n of nodes) if (n.kind === "container") c += 1 + countContainers(n.children);
+  return c;
 }
 
-export function createLayer(project: ManualProject, name?: string): ManualProject {
-  const p = ensureLayerTree(project);
-  const tree = { ...p.layerTree! };
-  const n = tree.layers.length + 1;
-  const layer: ManualLayer = {
-    id: newLayerId("L"),
-    name: name || `Layer ${n}`,
-    locked: false,
-    visible: true,
-    shapeIds: [],
+function buildTreeFromShapes(shapes: ManualShape[]): ManualLayerTree {
+  return { root: shapes.map((s) => makeLeaf(s.id)), activeContainerId: null };
+}
+
+/** v1 flat tree → v2 recursive tree. Layers & groups both become containers. */
+function migrateLayerTree(old: LegacyLayerTree, shapes: ManualShape[]): ManualLayerTree {
+  const shapeIds = new Set(shapes.map((s) => s.id));
+  const layerMap = new Map(old.layers.map((l) => [l.id, l]));
+  const groupMap = new Map(old.groups.map((g) => [g.id, g]));
+  const used = new Set<string>();
+  const leafFor = (sid: string): ManualLeafNode | null => {
+    if (!shapeIds.has(sid) || used.has(sid)) return null;
+    used.add(sid);
+    return makeLeaf(sid);
   };
-  return {
-    ...p,
-    layerTree: {
-      ...tree,
-      layers: [...tree.layers, layer],
-      rootOrder: [...tree.rootOrder, layer.id],
-      activeLayerId: layer.id,
-    },
-  };
-}
-
-export function assignShapeToActiveLayer(project: ManualProject, shapeId: string): ManualProject {
-  const tree = getLayerTree(project);
-  if (!tree.activeLayerId) return project;
-  const p = ensureLayerTree(project);
-  const t = p.layerTree!;
-  const layers = t.layers.map((l) => ({
-    ...l,
-    shapeIds: l.shapeIds.filter((id) => id !== shapeId),
-  }));
-  const idx = layers.findIndex((l) => l.id === t.activeLayerId);
-  if (idx < 0) return project;
-  layers[idx] = { ...layers[idx], shapeIds: [...layers[idx].shapeIds, shapeId] };
-  return { ...p, layerTree: { ...t, layers } };
-}
-
-export function removeShapeFromLayers(project: ManualProject, shapeId: string): ManualProject {
-  if (!project.layerTree) return project;
-  return {
-    ...project,
-    layerTree: {
-      ...project.layerTree,
-      layers: project.layerTree.layers.map((l) => ({
-        ...l,
-        shapeIds: l.shapeIds.filter((id) => id !== shapeId),
-      })),
-    },
-  };
-}
-
-export function patchLayer(
-  project: ManualProject,
-  layerId: string,
-  patch: Partial<Pick<ManualLayer, "name" | "locked" | "visible" | "collapsed">>,
-): ManualProject {
-  const p = ensureLayerTree(project);
-  return {
-    ...p,
-    layerTree: {
-      ...p.layerTree!,
-      layers: p.layerTree!.layers.map((l) => (l.id === layerId ? { ...l, ...patch } : l)),
-    },
-  };
-}
-
-export function patchGroup(
-  project: ManualProject,
-  groupId: string,
-  patch: Partial<Pick<ManualLayerGroup, "name" | "locked" | "visible" | "collapsed">>,
-): ManualProject {
-  const p = ensureLayerTree(project);
-  return {
-    ...p,
-    layerTree: {
-      ...p.layerTree!,
-      groups: p.layerTree!.groups.map((g) => (g.id === groupId ? { ...g, ...patch } : g)),
-    },
-  };
-}
-
-export function setActiveLayer(project: ManualProject, layerId: string | null): ManualProject {
-  const p = ensureLayerTree(project);
-  return { ...p, layerTree: { ...p.layerTree!, activeLayerId: layerId } };
-}
-
-/** Delete layer/group containers; shapes become ungrouped (not deleted). */
-export function deleteLayerNodes(project: ManualProject, nodeIds: string[]): ManualProject {
-  const p = ensureLayerTree(project);
-  let tree = p.layerTree!;
-  const idSet = new Set(nodeIds);
-
-  // Expand groups: deleting a group removes the group but keeps child layers at root
-  for (const id of [...idSet]) {
-    const g = groupById(tree, id);
+  const layerToContainer = (l: LegacyLayer): ManualContainerNode => ({
+    id: l.id,
+    kind: "container",
+    name: l.name,
+    locked: l.locked,
+    visible: l.visible,
+    collapsed: l.collapsed,
+    children: l.shapeIds.map(leafFor).filter((x): x is ManualLeafNode => !!x),
+  });
+  const root: ManualNode[] = [];
+  const inGroup = new Set(old.groups.flatMap((g) => g.childIds));
+  for (const id of old.rootOrder) {
+    const g = groupMap.get(id);
     if (g) {
-      tree = {
-        ...tree,
-        groups: tree.groups.filter((x) => x.id !== id),
-        rootOrder: tree.rootOrder
-          .filter((rid) => rid !== id)
-          .concat(g.childIds.filter((cid) => !tree.rootOrder.includes(cid) && !idSet.has(cid))),
-      };
-      // remove from any parent — groups are only at root in v1
+      root.push({
+        id: g.id,
+        kind: "container",
+        name: g.name,
+        locked: g.locked,
+        visible: g.visible,
+        collapsed: g.collapsed,
+        children: g.childIds
+          .map((lid) => layerMap.get(lid))
+          .filter((l): l is LegacyLayer => !!l)
+          .map(layerToContainer),
+      });
+      continue;
     }
+    const l = layerMap.get(id);
+    if (l && !inGroup.has(l.id)) root.push(layerToContainer(l));
   }
-
-  const removeLayers = new Set(
-    [...idSet].filter((id) => tree.layers.some((l) => l.id === id)),
-  );
-  tree = {
-    ...tree,
-    layers: tree.layers.filter((l) => !removeLayers.has(l.id)),
-    groups: tree.groups.map((g) => ({
-      ...g,
-      childIds: g.childIds.filter((cid) => !removeLayers.has(cid)),
-    })),
-    rootOrder: tree.rootOrder.filter((id) => !removeLayers.has(id) && !idSet.has(id)),
-    activeLayerId:
-      tree.activeLayerId && removeLayers.has(tree.activeLayerId) ? null : tree.activeLayerId,
-  };
-
-  return { ...p, layerTree: tree };
+  // orphan layers not in rootOrder / not in a group
+  for (const l of old.layers) {
+    if (root.some((n) => n.id === l.id) || inGroup.has(l.id) || old.rootOrder.includes(l.id)) continue;
+    root.push(layerToContainer(l));
+  }
+  // previously-ungrouped shapes → root front (preserve current "on top" z)
+  for (const s of shapes) {
+    const leaf = leafFor(s.id);
+    if (leaf) root.push(leaf);
+  }
+  const activeContainerId =
+    old.activeLayerId && layerMap.has(old.activeLayerId) ? old.activeLayerId : null;
+  return { root, activeContainerId };
 }
 
-/**
- * Group selected layers and/or ungrouped shapes.
- * Ungrouped shapes → new layer first; then wrap selected layers in a group.
- */
-export function groupSelection(
-  project: ManualProject,
-  selectedLayerIds: string[],
-  selectedUngroupedShapeIds: string[],
-): ManualProject {
-  let p = ensureLayerTree(project);
-  const layerIds = [...selectedLayerIds];
+/** Keep tree ↔ project.shapes in sync. Returns SAME ref when already clean. */
+function reconcileTree(tree: ManualLayerTree, shapes: ManualShape[]): ManualLayerTree {
+  const shapeIds = new Set(shapes.map((s) => s.id));
+  const present = new Set<string>();
+  collectLeafShapeIds(tree.root, present);
+  const missing = shapes.filter((s) => !present.has(s.id));
+  let hasDead = false;
+  for (const id of present) if (!shapeIds.has(id)) { hasDead = true; break; }
+  if (missing.length === 0 && !hasDead) return tree;
+  let root = hasDead ? pruneDeadLeaves(tree.root, shapeIds) : tree.root;
+  for (const s of missing) root = [...root, makeLeaf(s.id)];
+  return { ...tree, root };
+}
 
-  if (selectedUngroupedShapeIds.length > 0) {
-    p = createLayer(p, `Layer ${getLayerTree(p).layers.length}`);
-    const lid = p.layerTree!.activeLayerId!;
-    p = {
-      ...p,
-      layerTree: {
-        ...p.layerTree!,
-        layers: p.layerTree!.layers.map((l) =>
-          l.id === lid ? { ...l, shapeIds: [...selectedUngroupedShapeIds] } : l,
-        ),
-      },
-    };
-    layerIds.push(lid);
+export function getLayerTree(project: ManualProject | null | undefined): ManualLayerTree {
+  if (!project) return emptyLayerTree();
+  const raw = project.layerTree as unknown;
+  if (!raw) return buildTreeFromShapes(project.shapes);
+  if (isLegacyTree(raw)) return migrateLayerTree(raw, project.shapes);
+  return reconcileTree(raw as ManualLayerTree, project.shapes);
+}
+
+// ---- generic recursive node helpers ----
+function isContainer(n: ManualNode): n is ManualContainerNode {
+  return n.kind === "container";
+}
+
+export interface NodeLocation {
+  node: ManualNode;
+  parent: ManualContainerNode | null;
+  index: number;
+  ancestors: ManualContainerNode[];
+}
+
+export function findNode(tree: ManualLayerTree, id: ManualNodeId): NodeLocation | null {
+  const walk = (
+    nodes: ManualNode[],
+    parent: ManualContainerNode | null,
+    ancestors: ManualContainerNode[],
+  ): NodeLocation | null => {
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      if (n.id === id) return { node: n, parent, index: i, ancestors };
+      if (isContainer(n)) {
+        const r = walk(n.children, n, [...ancestors, n]);
+        if (r) return r;
+      }
+    }
+    return null;
+  };
+  return walk(tree.root, null, []);
+}
+
+function leafForShape(tree: ManualLayerTree, shapeId: string): ManualLeafNode | null {
+  let found: ManualLeafNode | null = null;
+  const walk = (nodes: ManualNode[]) => {
+    for (const n of nodes) {
+      if (found) return;
+      if (n.kind === "leaf") {
+        if (n.shapeId === shapeId) found = n;
+      } else {
+        walk(n.children);
+      }
+    }
+  };
+  walk(tree.root);
+  return found;
+}
+
+export function collectDescendantIds(node: ManualNode): Set<string> {
+  const out = new Set<string>();
+  const walk = (n: ManualNode) => {
+    if (n.kind === "container") for (const c of n.children) { out.add(c.id); walk(c); }
+  };
+  walk(node);
+  return out;
+}
+
+/** Immutable map-by-id: replace matching node via fn. */
+function mapNodes(nodes: ManualNode[], id: string, fn: (n: ManualNode) => ManualNode): ManualNode[] {
+  return nodes.map((n) => {
+    if (n.id === id) return fn(n);
+    if (n.kind === "container") return { ...n, children: mapNodes(n.children, id, fn) };
+    return n;
+  });
+}
+
+function removeNodeFrom(nodes: ManualNode[], id: string): { nodes: ManualNode[]; removed: ManualNode | null } {
+  let removed: ManualNode | null = null;
+  const out: ManualNode[] = [];
+  for (const n of nodes) {
+    if (n.id === id) { removed = n; continue; }
+    if (n.kind === "container") {
+      const r = removeNodeFrom(n.children, id);
+      if (r.removed) { removed = r.removed; out.push({ ...n, children: r.nodes }); continue; }
+    }
+    out.push(n);
   }
+  return { nodes: out, removed };
+}
 
-  const unique = [...new Set(layerIds)].filter((id) =>
-    getLayerTree(p).layers.some((l) => l.id === id),
-  );
-  if (unique.length < 2 && selectedUngroupedShapeIds.length === 0) return project;
-  if (unique.length < 1) return project;
+/** Insert node into parentId (null = root) at model index. */
+function insertNodeInto(
+  nodes: ManualNode[],
+  parentId: string | null,
+  index: number,
+  node: ManualNode,
+): ManualNode[] {
+  if (parentId == null) {
+    const i = Math.max(0, Math.min(index, nodes.length));
+    return [...nodes.slice(0, i), node, ...nodes.slice(i)];
+  }
+  return nodes.map((n) => {
+    if (n.kind !== "container") return n;
+    if (n.id === parentId) {
+      const i = Math.max(0, Math.min(index, n.children.length));
+      return { ...n, children: [...n.children.slice(0, i), node, ...n.children.slice(i)] };
+    }
+    return { ...n, children: insertNodeInto(n.children, parentId, index, node) };
+  });
+}
 
-  // If only one layer from wrapping shapes and no other layers, still allow single-layer "group"? Plan says ≥2 items. If we wrapped shapes into one layer only, unique.length===1 — skip group, just keep layer.
-  if (unique.length < 2) return p;
+// ---- effective (cascaded) flags, memoized per tree ref ----
+type Flags = { visible: boolean; locked: boolean };
+type FlagMaps = { shapes: Map<string, Flags>; nodes: Map<string, Flags> };
+const effectiveFlagsCache = new WeakMap<ManualLayerTree, FlagMaps>();
 
-  const tree = getLayerTree(p);
-  // Pull layers out of root / other groups into new group
-  const groups = tree.groups.map((g) => ({
-    ...g,
-    childIds: g.childIds.filter((cid) => !unique.includes(cid)),
-  }));
-  const rootOrder = tree.rootOrder.filter((id) => !unique.includes(id));
-  const group: ManualLayerGroup = {
-    id: newLayerId("G"),
-    name: `Group ${tree.groups.length + 1}`,
+function computeEffectiveFlags(tree: ManualLayerTree): FlagMaps {
+  const shapes = new Map<string, Flags>();
+  const nodes = new Map<string, Flags>();
+  const walk = (list: ManualNode[], pv: boolean, pl: boolean) => {
+    for (const n of list) {
+      const visible = pv && n.visible;
+      const locked = pl || n.locked;
+      nodes.set(n.id, { visible, locked });
+      if (n.kind === "leaf") shapes.set(n.shapeId, { visible, locked });
+      else walk(n.children, visible, locked);
+    }
+  };
+  walk(tree.root, true, false);
+  return { shapes, nodes };
+}
+
+function effectiveFlags(project: ManualProject): FlagMaps {
+  const tree = getLayerTree(project);
+  let c = effectiveFlagsCache.get(tree);
+  if (!c) {
+    c = computeEffectiveFlags(tree);
+    effectiveFlagsCache.set(tree, c);
+  }
+  return c;
+}
+
+export function isShapeVisible(project: ManualProject, shapeId: string): boolean {
+  return effectiveFlags(project).shapes.get(shapeId)?.visible ?? true;
+}
+
+export function isShapeLocked(project: ManualProject, shapeId: string): boolean {
+  return effectiveFlags(project).shapes.get(shapeId)?.locked ?? false;
+}
+
+/** Effective (ancestor-cascaded) visibility of a tree node — for panel rows. */
+export function isNodeVisible(project: ManualProject, nodeId: string): boolean {
+  return effectiveFlags(project).nodes.get(nodeId)?.visible ?? true;
+}
+
+/** Effective (ancestor-cascaded) lock of a tree node — for panel rows. */
+export function isNodeLocked(project: ManualProject, nodeId: string): boolean {
+  return effectiveFlags(project).nodes.get(nodeId)?.locked ?? false;
+}
+
+/** Leaf node id owning this shape (for syncing canvas ↔ panel selection). */
+export function nodeIdForShape(project: ManualProject, shapeId: string): string | null {
+  return leafForShape(getLayerTree(project), shapeId)?.id ?? null;
+}
+
+/** Shape id a leaf node references, or null for containers. */
+export function shapeIdForNode(project: ManualProject, nodeId: string): string | null {
+  const f = findNode(getLayerTree(project), nodeId);
+  return f && f.node.kind === "leaf" ? f.node.shapeId : null;
+}
+
+/** Paint order: DFS of the tree in model order (back→front). */
+export function orderedShapeIds(project: ManualProject): string[] {
+  const tree = getLayerTree(project);
+  const out: string[] = [];
+  const walk = (nodes: ManualNode[]) => {
+    for (const n of nodes) {
+      if (n.kind === "leaf") out.push(n.shapeId);
+      else walk(n.children);
+    }
+  };
+  walk(tree.root);
+  // safety net: any shape without a leaf (should not happen post-reconcile)
+  const seen = new Set(out);
+  for (const s of project.shapes) if (!seen.has(s.id)) out.push(s.id);
+  return out;
+}
+
+/** Store a fully-normalized (migrated + reconciled) tree on the project. */
+export function ensureLayerTree(project: ManualProject): ManualProject {
+  const tree = getLayerTree(project);
+  if (project.layerTree === tree) return project;
+  return { ...project, layerTree: tree };
+}
+
+/** Create an empty container in parentId (null = root front) and make it active. */
+export function createContainer(
+  project: ManualProject,
+  parentId: string | null = null,
+  name?: string,
+): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  const node: ManualContainerNode = {
+    id: newNodeId("g"),
+    kind: "container",
+    name: name || `Group ${countContainers(tree.root) + 1}`,
     locked: false,
     visible: true,
-    childIds: unique,
     collapsed: false,
+    children: [],
   };
-  return {
-    ...p,
-    layerTree: {
-      ...tree,
-      groups: [...groups, group],
-      rootOrder: [...rootOrder, group.id],
-    },
-  };
+  const parent = parentId ? findNode(tree, parentId) : null;
+  const targetParentId = parent && parent.node.kind === "container" ? parentId : null;
+  const siblings =
+    targetParentId != null
+      ? (findNode(tree, targetParentId)!.node as ManualContainerNode).children
+      : tree.root;
+  const root = insertNodeInto(tree.root, targetParentId, siblings.length, node);
+  return { ...p, layerTree: { ...tree, root, activeContainerId: node.id } };
 }
 
-export function moveShapesToLayer(
+/** Add a leaf for a shape into the active container (or root front). No-op if it exists. */
+export function insertLeafForShape(project: ManualProject, shapeId: string): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  if (leafForShape(tree, shapeId)) return p;
+  const leaf = makeLeaf(shapeId);
+  const active = tree.activeContainerId ? findNode(tree, tree.activeContainerId) : null;
+  if (active && active.node.kind === "container") {
+    const root = insertNodeInto(
+      tree.root,
+      tree.activeContainerId,
+      active.node.children.length,
+      leaf,
+    );
+    return { ...p, layerTree: { ...tree, root } };
+  }
+  return { ...p, layerTree: { ...tree, root: [...tree.root, leaf] } };
+}
+
+export function removeLeafForShape(project: ManualProject, shapeId: string): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  const leaf = leafForShape(tree, shapeId);
+  if (!leaf) return p;
+  const { nodes } = removeNodeFrom(tree.root, leaf.id);
+  return { ...p, layerTree: { ...tree, root: nodes } };
+}
+
+/** Patch any node (container or leaf) — name/locked/visible/collapsed. */
+export function patchNode(
   project: ManualProject,
-  shapeIds: string[],
-  layerId: string,
+  nodeId: string,
+  patch: Partial<Pick<ManualContainerNode, "name" | "locked" | "visible" | "collapsed">>,
 ): ManualProject {
   const p = ensureLayerTree(project);
   const tree = p.layerTree!;
-  if (!layerById(tree, layerId)) return project;
-  const set = new Set(shapeIds);
-  const layers = tree.layers.map((l) => {
-    const without = l.shapeIds.filter((id) => !set.has(id));
-    if (l.id === layerId) return { ...l, shapeIds: [...without, ...shapeIds] };
-    return { ...l, shapeIds: without };
-  });
-  return { ...p, layerTree: { ...tree, layers } };
+  const root = mapNodes(tree.root, nodeId, (n) => ({ ...n, ...patch }));
+  return { ...p, layerTree: { ...tree, root } };
 }
 
-export function setRootOrder(project: ManualProject, rootOrder: string[]): ManualProject {
+export function setActiveContainer(project: ManualProject, nodeId: string | null): ManualProject {
   const p = ensureLayerTree(project);
-  return { ...p, layerTree: { ...p.layerTree!, rootOrder: [...rootOrder] } };
+  return { ...p, layerTree: { ...p.layerTree!, activeContainerId: nodeId } };
 }
 
-export function setGroupChildIds(
-  project: ManualProject,
-  groupId: string,
-  childIds: string[],
-): ManualProject {
-  const p = ensureLayerTree(project);
-  if (!groupById(p.layerTree!, groupId)) return project;
-  return {
-    ...p,
-    layerTree: {
-      ...p.layerTree!,
-      groups: p.layerTree!.groups.map((g) =>
-        g.id === groupId ? { ...g, childIds: [...childIds] } : g,
-      ),
-    },
-  };
+/** Delete container nodes; their children are promoted into the parent (shapes kept). */
+export function deleteContainers(project: ManualProject, nodeIds: string[]): ManualProject {
+  let p = ensureLayerTree(project);
+  for (const id of nodeIds) {
+    const tree = p.layerTree!;
+    const f = findNode(tree, id);
+    if (!f || f.node.kind !== "container") continue;
+    const kids = f.node.children;
+    const parentId = f.parent ? f.parent.id : null;
+    const { nodes: without } = removeNodeFrom(tree.root, id);
+    let root = without;
+    let idx = f.index;
+    for (const k of kids) {
+      root = insertNodeInto(root, parentId, idx, k);
+      idx++;
+    }
+    const activeContainerId = tree.activeContainerId === id ? null : tree.activeContainerId;
+    p = { ...p, layerTree: { ...tree, root, activeContainerId } };
+  }
+  return p;
 }
 
-export function setLayerShapeIds(
+/**
+ * Move a node under newParentId (null = root) at model index.
+ * Rejects dropping a container into itself/a descendant (cycle guard) and no-ops
+ * if the moved node is effectively locked.
+ */
+export function moveNode(
   project: ManualProject,
-  layerId: string,
-  shapeIds: string[],
-): ManualProject {
-  const p = ensureLayerTree(project);
-  if (!layerById(p.layerTree!, layerId)) return project;
-  return {
-    ...p,
-    layerTree: {
-      ...p.layerTree!,
-      layers: p.layerTree!.layers.map((l) =>
-        l.id === layerId ? { ...l, shapeIds: [...shapeIds] } : l,
-      ),
-    },
-  };
-}
-
-export type LayerMoveTarget = { type: "root" } | { type: "group"; groupId: string };
-
-/** Pull a layer out of root/groups and insert into target at model index. */
-export function moveLayer(
-  project: ManualProject,
-  layerId: string,
-  target: LayerMoveTarget,
+  nodeId: string,
+  newParentId: string | null,
   indexModel: number,
 ): ManualProject {
   const p = ensureLayerTree(project);
   const tree = p.layerTree!;
-  if (!layerById(tree, layerId)) return project;
-  if (target.type === "group" && !groupById(tree, target.groupId)) return project;
-
-  let rootOrder = tree.rootOrder.filter((id) => id !== layerId);
-  let groups = tree.groups.map((g) => ({
-    ...g,
-    childIds: g.childIds.filter((id) => id !== layerId),
-  }));
-
-  const clamp = (arr: string[], i: number) => Math.max(0, Math.min(i, arr.length));
-
-  if (target.type === "root") {
-    const i = clamp(rootOrder, indexModel);
-    rootOrder = [...rootOrder.slice(0, i), layerId, ...rootOrder.slice(i)];
-  } else {
-    groups = groups.map((g) => {
-      if (g.id !== target.groupId) return g;
-      const kids = g.childIds.filter((id) => id !== layerId);
-      const i = clamp(kids, indexModel);
-      return { ...g, childIds: [...kids.slice(0, i), layerId, ...kids.slice(i)] };
-    });
+  const found = findNode(tree, nodeId);
+  if (!found) return project;
+  if (newParentId) {
+    if (newParentId === nodeId) return project;
+    if (collectDescendantIds(found.node).has(newParentId)) return project;
+    const parent = findNode(tree, newParentId);
+    if (!parent || parent.node.kind !== "container") return project;
   }
-
-  return { ...p, layerTree: { ...tree, rootOrder, groups } };
+  const { nodes: without, removed } = removeNodeFrom(tree.root, nodeId);
+  if (!removed) return project;
+  const root = insertNodeInto(without, newParentId, indexModel, removed);
+  return { ...p, layerTree: { ...tree, root } };
 }
 
 /**
- * Remove shape from all layers; if targetLayerId set, insert at model index;
- * if null, leave ungrouped.
+ * Wrap the selected nodes in a new container, placed where the topmost selection
+ * sat. Nested-under-selection ids are dropped (a container carries its children).
  */
-export function moveShape(
-  project: ManualProject,
-  shapeId: string,
-  targetLayerId: string | null,
-  indexModel: number,
-): ManualProject {
-  if (!project.shapes.some((s) => s.id === shapeId)) return project;
-  const p = ensureLayerTree(project);
-  const tree = p.layerTree!;
-  if (targetLayerId && !layerById(tree, targetLayerId)) return project;
-
-  let layers = tree.layers.map((l) => ({
-    ...l,
-    shapeIds: l.shapeIds.filter((id) => id !== shapeId),
-  }));
-
-  if (targetLayerId) {
-    layers = layers.map((l) => {
-      if (l.id !== targetLayerId) return l;
-      const ids = l.shapeIds.filter((id) => id !== shapeId);
-      const i = Math.max(0, Math.min(indexModel, ids.length));
-      return { ...l, shapeIds: [...ids.slice(0, i), shapeId, ...ids.slice(i)] };
-    });
-  }
-
-  return { ...p, layerTree: { ...tree, layers } };
-}
-
-/**
- * Reorder ungrouped shapes among themselves by rearranging `project.shapes`.
- * `shapeIdsModel` is the desired order of currently-ungrouped shapes (back→front).
- * Assigned shapes keep relative order; ungrouped slots follow the given list.
- */
-export function reorderUngrouped(project: ManualProject, shapeIdsModel: string[]): ManualProject {
-  const ungrouped = new Set(ungroupedShapeIds(project));
-  const wanted = shapeIdsModel.filter((id) => ungrouped.has(id));
-  if (wanted.length === 0) return project;
-  let ui = 0;
-  const rebuilt = project.shapes.map((s) => {
-    if (!ungrouped.has(s.id)) return s;
-    const id = wanted[ui++];
-    return project.shapes.find((x) => x.id === id) ?? s;
+export function groupNodes(project: ManualProject, selectedIds: string[]): ManualProject {
+  const p0 = ensureLayerTree(project);
+  const tree0 = p0.layerTree!;
+  const sel = new Set(selectedIds);
+  const top = selectedIds.filter((id) => {
+    const f = findNode(tree0, id);
+    return !!f && !f.ancestors.some((a) => sel.has(a.id));
   });
-  return { ...project, shapes: rebuilt };
+  if (top.length < 1) return project;
+
+  const first = findNode(tree0, top[0])!;
+  const parentId = first.parent ? first.parent.id : null;
+  const container: ManualContainerNode = {
+    id: newNodeId("g"),
+    kind: "container",
+    name: `Group ${countContainers(tree0.root) + 1}`,
+    locked: false,
+    visible: true,
+    collapsed: false,
+    children: [],
+  };
+  let p: ManualProject = {
+    ...p0,
+    layerTree: {
+      ...tree0,
+      root: insertNodeInto(tree0.root, parentId, first.index, container),
+    },
+  };
+  let i = 0;
+  for (const id of top) {
+    p = moveNode(p, id, container.id, i);
+    i++;
+  }
+  return { ...p, layerTree: { ...p.layerTree!, activeContainerId: container.id } };
 }
 
-/** Set collapsed on every layer and group. */
+/** Set collapsed on every container node. */
 export function setAllCollapsed(project: ManualProject, collapsed: boolean): ManualProject {
   const p = ensureLayerTree(project);
   const tree = p.layerTree!;
-  return {
-    ...p,
-    layerTree: {
-      ...tree,
-      layers: tree.layers.map((l) => ({ ...l, collapsed })),
-      groups: tree.groups.map((g) => ({ ...g, collapsed })),
-    },
+  const walk = (nodes: ManualNode[]): ManualNode[] =>
+    nodes.map((n) => (n.kind === "container" ? { ...n, collapsed, children: walk(n.children) } : n));
+  return { ...p, layerTree: { ...tree, root: walk(tree.root) } };
+}
+
+/** Flat DFS of node ids in panel display order (front→back) for range selection. */
+export function displayRowOrder(project: ManualProject): string[] {
+  const tree = getLayerTree(project);
+  const rows: string[] = [];
+  const walk = (nodes: ManualNode[]) => {
+    for (const n of [...nodes].reverse()) {
+      rows.push(n.id);
+      if (n.kind === "container" && !n.collapsed) walk(n.children);
+    }
   };
+  walk(tree.root);
+  return rows;
 }
 
 export function getStroke(project: ManualProject | null | undefined): ManualStroke {
@@ -720,17 +812,6 @@ export const CATEGORY_COLORS: Record<Category, string> = {
   zone: AEON_CONFIG.big.zone_yellow,
   ignore: "#CCCCCC",
 };
-
-// stable category render order (shell first below) — matches svg.py CATEGORY_ORDER
-const CATEGORY_ORDER: Category[] = [
-  "anchor",
-  "vacant",
-  "zone",
-  "specialty",
-  "services",
-  "fashion",
-  "fnb",
-];
 
 let idCounter = 0;
 export function newShapeId(): string {
@@ -1053,9 +1134,8 @@ export function emitManualSvg(
 
   const norm = (p: Point): Point => [(p[0] - x0) * scale + pad, (p[1] - y0) * scale + pad];
 
-  const visibleShapes = project.shapes.filter((s) => isShapeVisible(project, s.id));
-  const cats = CATEGORY_ORDER.filter((c) => visibleShapes.some((s) => s.category === c));
-  for (const s of visibleShapes) if (!cats.includes(s.category)) cats.push(s.category);
+  const shapeById = new Map(project.shapes.map((s) => [s.id, s]));
+  const tree = getLayerTree(project);
 
   const strokeHex = stroke.color;
   const strokeW = stroke.width * scale;
@@ -1083,33 +1163,49 @@ export function emitManualSvg(
     o.push(`  </g>`);
   }
 
+  // Emit shapes mirroring the layer tree in true paint order (back→front), so the
+  // export z-order matches the canvas exactly. Per-category counter keeps stable,
+  // Figma-selectable ids + data-family; hidden nodes/leaves are skipped.
+  const catCount: Partial<Record<Category, number>> = {};
+  const emitLeaf = (shapeId: string, indent: string) => {
+    const s = shapeById.get(shapeId);
+    if (!s || !isShapeVisible(project, shapeId)) return;
+    const cat = s.category;
+    catCount[cat] = (catCount[cat] ?? 0) + 1;
+    const id = `${cat}-${String(catCount[cat]).padStart(2, "0")}`;
+    const verts = shapeVerts(s).map((v) => normVert(v, norm));
+    const flat = flattenPolyVerts(verts);
+    const area = Math.round(shoelaceArea(flat.length >= 3 ? flat : verts.map((v) => v.p)));
+    // Prefer bezier path (matches canvas); fallback to densified polyline
+    const dd = verts.length >= 2 ? pathDFromVerts(verts) : d(flat);
+    const fill = exportFill(s.fill, s.category);
+    o.push(
+      `${indent}<path id="${id}" data-area="${area}" data-family="${cat}" ` +
+        `fill="${fill}" stroke="none" d="${dd}"/>`,
+    );
+    o.push(
+      `${indent}<path data-stroke-for="${id}" fill="none" stroke="${strokeHex}" ` +
+        `stroke-width="${strokeW.toFixed(2)}" stroke-linejoin="round" ` +
+        `stroke-linecap="round" d="${dd}"/>`,
+    );
+  };
+  const emitNodes = (nodes: ManualNode[], indent: string) => {
+    for (const n of nodes) {
+      if (n.kind === "leaf") {
+        emitLeaf(n.shapeId, indent);
+        continue;
+      }
+      if (!isNodeVisible(project, n.id)) continue; // skip hidden subtree
+      const nm = n.name ? ` data-name="${esc(n.name)}"` : "";
+      o.push(`${indent}<g id="node-${n.id}"${nm}>`);
+      emitNodes(n.children, indent + "  ");
+      o.push(`${indent}</g>`);
+    }
+  };
+
   const clipAttr = shellNorm ? ` clip-path="url(#shell)"` : "";
   o.push(`  <g id="units"${clipAttr}>`);
-  for (const cat of cats) {
-    o.push(`    <g id="cat-${cat}">`);
-    let n = 0;
-    for (const s of visibleShapes) {
-      if (s.category !== cat) continue;
-      n += 1;
-      const id = `${cat}-${String(n).padStart(2, "0")}`;
-      const verts = shapeVerts(s).map((v) => normVert(v, norm));
-      const flat = flattenPolyVerts(verts);
-      const area = Math.round(shoelaceArea(flat.length >= 3 ? flat : verts.map((v) => v.p)));
-      // Prefer bezier path (matches canvas); fallback to densified polyline
-      const dd = verts.length >= 2 ? pathDFromVerts(verts) : d(flat);
-      const fill = exportFill(s.fill, s.category);
-      o.push(
-        `      <path id="${id}" data-area="${area}" data-family="${cat}" ` +
-          `fill="${fill}" stroke="none" d="${dd}"/>`,
-      );
-      o.push(
-        `      <path data-stroke-for="${id}" fill="none" stroke="${strokeHex}" ` +
-          `stroke-width="${strokeW.toFixed(2)}" stroke-linejoin="round" ` +
-          `stroke-linecap="round" d="${dd}"/>`,
-      );
-    }
-    o.push(`    </g>`);
-  }
+  emitNodes(tree.root, "    ");
   o.push(`  </g>`);
 
   o.push(`  <g id="badge">`);
@@ -1181,7 +1277,7 @@ export function newTabId(): string {
 
 export function newProject(floor: string): ManualProject {
   return {
-    version: 1,
+    version: 2,
     floor,
     bg: { dataUrl: "", width: 0, height: 0, opacity: 0.4 },
     shapes: [],
@@ -1251,6 +1347,19 @@ function workspaceWithLiteBgs(ws: ManualWorkspace): ManualWorkspace {
   };
 }
 
+/** Normalize every tab's layer tree (migrate v1→v2 / reconcile) + stamp version 2. */
+function normalizeWorkspace(ws: ManualWorkspace): ManualWorkspace {
+  return {
+    ...ws,
+    tabs: ws.tabs.map((t) => {
+      const project = ensureLayerTree(t.project);
+      return project === t.project
+        ? t
+        : { ...t, project: { ...project, version: 2 } };
+    }),
+  };
+}
+
 export function loadWorkspace(): ManualWorkspace | null {
   if (typeof window === "undefined") return null;
   try {
@@ -1261,7 +1370,7 @@ export function loadWorkspace(): ManualWorkspace | null {
         if (!ws.tabs.some((t) => t.id === ws.activeTabId)) {
           ws.activeTabId = ws.tabs[0].id;
         }
-        return ws;
+        return normalizeWorkspace(ws);
       }
     }
   } catch {
@@ -1329,5 +1438,5 @@ export function isManualWorkspace(data: unknown): data is ManualWorkspace {
 export function isManualProject(data: unknown): data is ManualProject {
   if (!data || typeof data !== "object") return false;
   const p = data as ManualProject;
-  return p.version === 1 && Array.isArray(p.shapes);
+  return (p.version === 1 || p.version === 2) && Array.isArray(p.shapes);
 }
