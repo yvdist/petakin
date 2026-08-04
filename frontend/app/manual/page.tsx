@@ -14,7 +14,11 @@ import {
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
   DEFAULT_SHELL_STROKE,
+  DEFAULT_EXPORT_TARGET_H,
+  DEFAULT_EXPORT_TARGET_W,
   DEFAULT_PNG_SCALE,
+  EXPORT_DIM_MAX,
+  EXPORT_DIM_MIN,
   EXPORT_WIDTH_MAX,
   EXPORT_WIDTH_MIN,
   PNG_SCALE_MAX,
@@ -22,7 +26,7 @@ import {
   activeProject,
   computeExportLayout,
   createContainer,
-  defaultBadgeLayout,
+  defaultBadgeLayoutForCanvas,
   defaultFill,
   deleteContainers,
   displayRowOrder,
@@ -30,7 +34,10 @@ import {
   findNode,
   getBadgeLayout,
   getDrawOpacity,
+  getExportMode,
   getExportNormalizedWidth,
+  getExportTargetH,
+  getExportTargetW,
   getLayerTree,
   getPngScale,
   getShellStroke,
@@ -608,6 +615,9 @@ export default function ManualPage() {
       pngH: Math.round(layout.height * pngScale),
       pngScale,
       planW: getExportNormalizedWidth(project),
+      mode: getExportMode(project),
+      targetW: getExportTargetW(project),
+      targetH: getExportTargetH(project),
       badge: getBadgeLayout(project),
     };
   }, [project]);
@@ -631,6 +641,24 @@ export default function ManualPage() {
     }));
   };
 
+  const setExportMode = (mode: "width" | "contain" | "stretch") => {
+    updateActive((p) => ({ ...p, exportMode: mode }));
+  };
+
+  const setExportTargetW = (n: number) => {
+    updateActive((p) => ({
+      ...p,
+      exportTargetW: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
+    }));
+  };
+
+  const setExportTargetH = (n: number) => {
+    updateActive((p) => ({
+      ...p,
+      exportTargetH: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
+    }));
+  };
+
   const setPngScale = (n: number) => {
     updateActive((p) => ({
       ...p,
@@ -647,8 +675,11 @@ export default function ManualPage() {
 
   const resetBadgeLayout = () => {
     updateActive((p) => {
-      const planWidth = getExportNormalizedWidth(p) + 2 * AEON_CONFIG.pad;
-      return { ...p, badgeLayout: defaultBadgeLayout(planWidth, AEON_CONFIG.gutter) };
+      const layout = computeExportLayout(p);
+      return {
+        ...p,
+        badgeLayout: defaultBadgeLayoutForCanvas(layout.mode, layout.width, layout.planWidth, layout.gutter),
+      };
     });
   };
 
@@ -1158,19 +1189,83 @@ export default function ManualPage() {
           </Section>
 
           <Section title="Export">
-            <label className="mb-2 flex flex-col gap-0.5 text-xs">
-              Plan width (px)
-              <input
-                type="number"
-                min={EXPORT_WIDTH_MIN}
-                max={EXPORT_WIDTH_MAX}
-                step={50}
-                className="rounded border border-neutral-300 px-1.5 py-1"
-                value={exportPreview?.planW ?? AEON_CONFIG.normalizedWidth}
-                disabled={!project}
-                onChange={(e) => setExportWidth(Number(e.target.value))}
-              />
-            </label>
+            <div className="mb-2">
+              <div className="mb-1 text-xs text-neutral-500">Size mode</div>
+              <div className="flex gap-1">
+                {(
+                  [
+                    ["contain", "Fit box"],
+                    ["stretch", "Stretch"],
+                    ["width", "Width"],
+                  ] as const
+                ).map(([m, label]) => (
+                  <button
+                    key={m}
+                    type="button"
+                    disabled={!project}
+                    onClick={() => setExportMode(m)}
+                    title={
+                      m === "contain"
+                        ? "Fit content proportionally into the target box (compact, no gutter)"
+                        : m === "stretch"
+                          ? "Fill the target box exactly (may distort)"
+                          : "Legacy: plan width + right gutter for the badge"
+                    }
+                    className={`flex-1 rounded px-2 py-1.5 text-xs ${
+                      (exportPreview?.mode ?? "contain") === m
+                        ? "bg-brand text-white"
+                        : "bg-neutral-200 text-neutral-700"
+                    } disabled:opacity-40`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {(exportPreview?.mode ?? "contain") === "width" ? (
+              <label className="mb-2 flex flex-col gap-0.5 text-xs">
+                Plan width (px)
+                <input
+                  type="number"
+                  min={EXPORT_WIDTH_MIN}
+                  max={EXPORT_WIDTH_MAX}
+                  step={50}
+                  className="rounded border border-neutral-300 px-1.5 py-1"
+                  value={exportPreview?.planW ?? AEON_CONFIG.normalizedWidth}
+                  disabled={!project}
+                  onChange={(e) => setExportWidth(Number(e.target.value))}
+                />
+              </label>
+            ) : (
+              <div className="mb-2 grid grid-cols-2 gap-2 text-xs">
+                <label className="flex flex-col gap-0.5">
+                  Width (px)
+                  <input
+                    type="number"
+                    min={EXPORT_DIM_MIN}
+                    max={EXPORT_DIM_MAX}
+                    step={10}
+                    className="rounded border border-neutral-300 px-1.5 py-1"
+                    value={exportPreview?.targetW ?? DEFAULT_EXPORT_TARGET_W}
+                    disabled={!project}
+                    onChange={(e) => setExportTargetW(Number(e.target.value))}
+                  />
+                </label>
+                <label className="flex flex-col gap-0.5">
+                  Height (px)
+                  <input
+                    type="number"
+                    min={EXPORT_DIM_MIN}
+                    max={EXPORT_DIM_MAX}
+                    step={10}
+                    className="rounded border border-neutral-300 px-1.5 py-1"
+                    value={exportPreview?.targetH ?? DEFAULT_EXPORT_TARGET_H}
+                    disabled={!project}
+                    onChange={(e) => setExportTargetH(Number(e.target.value))}
+                  />
+                </label>
+              </div>
+            )}
             <div className="mb-2">
               <div className="mb-1 text-xs text-neutral-500">PNG scale</div>
               <div className="flex gap-1">

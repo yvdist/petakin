@@ -52,6 +52,17 @@ export interface ManualProject {
    * Default: AEON_CONFIG.normalizedWidth (1500).
    */
   exportNormalizedWidth?: number;
+  /**
+   * How the exported SVG is sized:
+   * - "width"   → legacy: plan width + 2*pad + right gutter (badge column).
+   * - "contain" → fit content proportionally into exportTargetW×exportTargetH (default).
+   * - "stretch" → fill exportTargetW×exportTargetH exactly (non-uniform, may distort).
+   */
+  exportMode?: "width" | "contain" | "stretch";
+  /** Target canvas width for contain/stretch modes. Default 1865. */
+  exportTargetW?: number;
+  /** Target canvas height for contain/stretch modes. Default 1182. */
+  exportTargetH?: number;
   /** PNG raster multiplier over SVG viewBox. Default 1. */
   pngScale?: number;
   /** Floor badge in export (normalized) coordinates. */
@@ -136,6 +147,11 @@ export const EXPORT_WIDTH_MIN = 400;
 export const EXPORT_WIDTH_MAX = 6000;
 export const PNG_SCALE_MIN = 1;
 export const PNG_SCALE_MAX = 3;
+export const DEFAULT_EXPORT_MODE: "width" | "contain" | "stretch" = "contain";
+export const DEFAULT_EXPORT_TARGET_W = 1865;
+export const DEFAULT_EXPORT_TARGET_H = 1182;
+export const EXPORT_DIM_MIN = 200;
+export const EXPORT_DIM_MAX = 8000;
 
 export function emptyLayerTree(): ManualLayerTree {
   return { root: [], activeContainerId: null };
@@ -673,6 +689,23 @@ export function getPngScale(project: ManualProject | null | undefined): number {
   return Math.max(PNG_SCALE_MIN, Math.min(PNG_SCALE_MAX, Math.round(n)));
 }
 
+export function getExportMode(project: ManualProject | null | undefined): "width" | "contain" | "stretch" {
+  const v = project?.exportMode;
+  return v === "width" || v === "contain" || v === "stretch" ? v : DEFAULT_EXPORT_MODE;
+}
+
+export function getExportTargetW(project: ManualProject | null | undefined): number {
+  const v = project?.exportTargetW;
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : DEFAULT_EXPORT_TARGET_W;
+  return Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n)));
+}
+
+export function getExportTargetH(project: ManualProject | null | undefined): number {
+  const v = project?.exportTargetH;
+  const n = typeof v === "number" && !Number.isNaN(v) ? v : DEFAULT_EXPORT_TARGET_H;
+  return Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n)));
+}
+
 /** Content bbox in source-image space used by export. */
 export function contentBBox(project: ManualProject): {
   x0: number;
@@ -709,6 +742,7 @@ export function contentBBox(project: ManualProject): {
   return { x0, y0, x1, y1 };
 }
 
+/** Legacy width-mode badge default: centered in the right gutter. */
 export function defaultBadgeLayout(planWidth: number, gutter: number = AEON_CONFIG.gutter): ManualBadgeLayout {
   const b = AEON_CONFIG.badge;
   return {
@@ -720,12 +754,32 @@ export function defaultBadgeLayout(planWidth: number, gutter: number = AEON_CONF
   };
 }
 
-export function getBadgeLayout(project: ManualProject): ManualBadgeLayout {
+/**
+ * Canvas-aware badge default. In contain/stretch modes the badge sits in the
+ * top-right corner INSIDE the target box (no gutter); in width mode it falls
+ * back to the legacy gutter placement.
+ */
+export function defaultBadgeLayoutForCanvas(
+  mode: "width" | "contain" | "stretch",
+  width: number,
+  planWidth: number,
+  gutter: number = AEON_CONFIG.gutter,
+): ManualBadgeLayout {
+  if (mode === "width") return defaultBadgeLayout(planWidth, gutter);
+  const b = AEON_CONFIG.badge;
   const pad = AEON_CONFIG.pad;
-  const gutter = AEON_CONFIG.gutter;
-  const targetW = getExportNormalizedWidth(project);
-  const planWidth = targetW + 2 * pad;
-  const fallback = defaultBadgeLayout(planWidth, gutter);
+  return {
+    cx: width - pad - b.r,
+    cy: pad + b.r,
+    r: b.r,
+    fontSize: b.fontSize,
+    strokeWidth: b.strokeWidth,
+  };
+}
+
+export function getBadgeLayout(project: ManualProject): ManualBadgeLayout {
+  const dims = computeCanvasDims(project);
+  const fallback = defaultBadgeLayoutForCanvas(dims.mode, dims.width, dims.planWidth, dims.gutter);
   const b = project.badgeLayout;
   if (!b) return fallback;
   return {
@@ -740,9 +794,104 @@ export function getBadgeLayout(project: ManualProject): ManualBadgeLayout {
   };
 }
 
-export type ExportLayout = {
+/** Canvas metrics/transform WITHOUT the badge (badge default needs these). */
+type CanvasDims = {
+  mode: "width" | "contain" | "stretch";
   x0: number;
   y0: number;
+  scaleX: number;
+  scaleY: number;
+  offsetX: number;
+  offsetY: number;
+  scale: number;
+  pad: number;
+  gutter: number;
+  targetW: number;
+  planWidth: number;
+  width: number;
+  height: number;
+};
+
+function computeCanvasDims(project: ManualProject): CanvasDims {
+  const pad = AEON_CONFIG.pad;
+  const gutter = AEON_CONFIG.gutter;
+  const mode = getExportMode(project);
+  const { x0, y0, x1, y1 } = contentBBox(project);
+  const spanX = Math.max(1, x1 - x0);
+  const spanY = Math.max(1, y1 - y0);
+
+  if (mode === "width") {
+    const targetW = getExportNormalizedWidth(project);
+    const scale = targetW / spanX;
+    const planWidth = targetW + 2 * pad;
+    return {
+      mode,
+      x0,
+      y0,
+      scaleX: scale,
+      scaleY: scale,
+      offsetX: pad,
+      offsetY: pad,
+      scale,
+      pad,
+      gutter,
+      targetW,
+      planWidth,
+      width: planWidth + gutter,
+      height: Math.max(spanY * scale + 2 * pad, 330),
+    };
+  }
+
+  // contain / stretch: fit into the target box, insetting by `pad` on all sides.
+  const width = getExportTargetW(project);
+  const height = getExportTargetH(project);
+  const innerW = Math.max(1, width - 2 * pad);
+  const innerH = Math.max(1, height - 2 * pad);
+  let scaleX: number;
+  let scaleY: number;
+  let offsetX: number;
+  let offsetY: number;
+  if (mode === "stretch") {
+    scaleX = innerW / spanX;
+    scaleY = innerH / spanY;
+    offsetX = pad;
+    offsetY = pad;
+  } else {
+    // contain: uniform scale, centered
+    const s = Math.min(innerW / spanX, innerH / spanY);
+    scaleX = s;
+    scaleY = s;
+    offsetX = (width - spanX * s) / 2;
+    offsetY = (height - spanY * s) / 2;
+  }
+  return {
+    mode,
+    x0,
+    y0,
+    scaleX,
+    scaleY,
+    offsetX,
+    offsetY,
+    scale: Math.min(scaleX, scaleY),
+    pad,
+    gutter,
+    targetW: width,
+    planWidth: width,
+    width,
+    height,
+  };
+}
+
+export type ExportLayout = {
+  mode: "width" | "contain" | "stretch";
+  x0: number;
+  y0: number;
+  /** Per-axis scales (equal except in stretch mode). */
+  scaleX: number;
+  scaleY: number;
+  offsetX: number;
+  offsetY: number;
+  /** Representative scale for stroke widths / badge preview sizing. */
   scale: number;
   pad: number;
   gutter: number;
@@ -755,38 +904,18 @@ export type ExportLayout = {
 
 /** Same transform/metrics as emitManualSvg — for UI preview and badge editing. */
 export function computeExportLayout(project: ManualProject): ExportLayout {
-  const pad = AEON_CONFIG.pad;
-  const gutter = AEON_CONFIG.gutter;
-  const targetW = getExportNormalizedWidth(project);
-  const { x0, y0, x1, y1 } = contentBBox(project);
-  const spanX = Math.max(1, x1 - x0);
-  const spanY = Math.max(1, y1 - y0);
-  const scale = targetW / spanX;
-  const planWidth = targetW + 2 * pad;
-  const width = planWidth + gutter;
-  const height = Math.max(spanY * scale + 2 * pad, 330);
-  return {
-    x0,
-    y0,
-    scale,
-    pad,
-    gutter,
-    targetW,
-    planWidth,
-    width,
-    height,
-    badge: getBadgeLayout(project),
-  };
+  const dims = computeCanvasDims(project);
+  return { ...dims, badge: getBadgeLayout(project) };
 }
 
 /** Map export-space point → source-image space. */
 export function exportToSource(layout: ExportLayout, p: Point): Point {
-  return [(p[0] - layout.pad) / layout.scale + layout.x0, (p[1] - layout.pad) / layout.scale + layout.y0];
+  return [(p[0] - layout.offsetX) / layout.scaleX + layout.x0, (p[1] - layout.offsetY) / layout.scaleY + layout.y0];
 }
 
 /** Map source-image point → export space. */
 export function sourceToExport(layout: ExportLayout, p: Point): Point {
-  return [(p[0] - layout.x0) * layout.scale + layout.pad, (p[1] - layout.y0) * layout.scale + layout.pad];
+  return [(p[0] - layout.x0) * layout.scaleX + layout.offsetX, (p[1] - layout.y0) * layout.scaleY + layout.offsetY];
 }
 
 // Categories a user can actually draw with (ignore is auto-only).
@@ -1136,13 +1265,13 @@ export function emitManualSvg(
 ): { svg: string; width: number; height: number } {
   const cfg = AEON_CONFIG;
   const layout = computeExportLayout(project);
-  const { pad, scale, x0, y0, width: W, height: H, badge } = layout;
+  const { scale, scaleX, scaleY, offsetX, offsetY, x0, y0, width: W, height: H, badge } = layout;
   const stroke = getStroke(project);
   const shellPts = project.shell && project.shell.length >= 3 ? project.shell : null;
   const badgeStroke = cfg.badge.stroke;
   const textY = badge.cy + badge.fontSize * 0.36;
 
-  const norm = (p: Point): Point => [(p[0] - x0) * scale + pad, (p[1] - y0) * scale + pad];
+  const norm = (p: Point): Point => [(p[0] - x0) * scaleX + offsetX, (p[1] - y0) * scaleY + offsetY];
 
   const shapeById = new Map(project.shapes.map((s) => [s.id, s]));
   const tree = getLayerTree(project);
