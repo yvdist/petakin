@@ -5,7 +5,6 @@ import {
   bendEdge,
   bendHitRadius,
   computeExportLayout,
-  contentBBox,
   defaultFill,
   edgeHitRadius,
   ellipseVertsFromBox,
@@ -195,20 +194,21 @@ export default function ManualCanvas({
     }
   }, [tool]);
 
-  /** Screen → SVG user space (viewBox), before pan/zoom group. */
-  const clientToSvg = useCallback(
-    (clientX: number, clientY: number): Point => {
-      const svg = svgRef.current!;
+  /** Screen → SVG user space (viewBox), before pan/zoom group. Uses the live CTM so it
+   *  is correct under any viewBox / preserveAspectRatio (letterboxing included). */
+  const clientToSvg = useCallback((clientX: number, clientY: number): Point => {
+    const svg = svgRef.current!;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) {
       const rect = svg.getBoundingClientRect();
-      const w = bg.width || 1;
-      const h = bg.height || 1;
-      return [
-        ((clientX - rect.left) / Math.max(1e-6, rect.width)) * w,
-        ((clientY - rect.top) / Math.max(1e-6, rect.height)) * h,
-      ];
-    },
-    [bg.width, bg.height],
-  );
+      return [clientX - rect.left, clientY - rect.top];
+    }
+    const pt = svg.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const p = pt.matrixTransform(ctm.inverse());
+    return [p.x, p.y];
+  }, []);
 
   /** Screen → content coords via the pan/zoom group's live CTM (no stale view). */
   const toContent = useCallback((clientX: number, clientY: number): Point => {
@@ -228,17 +228,14 @@ export default function ManualCanvas({
     return [p.x, p.y];
   }, [clientToSvg]);
 
-  const clientToSvgDelta = useCallback(
-    (dxClient: number, dyClient: number): Point => {
-      const svg = svgRef.current!;
-      const rect = svg.getBoundingClientRect();
-      return [
-        (dxClient / Math.max(1e-6, rect.width)) * (bg.width || 1),
-        (dyClient / Math.max(1e-6, rect.height)) * (bg.height || 1),
-      ];
-    },
-    [bg.width, bg.height],
-  );
+  const clientToSvgDelta = useCallback((dxClient: number, dyClient: number): Point => {
+    const svg = svgRef.current!;
+    const ctm = svg.getScreenCTM();
+    if (!ctm) return [dxClient, dyClient];
+    const inv = ctm.inverse();
+    // Transform a screen-space vector (no translation) into svg-user space.
+    return [inv.a * dxClient + inv.c * dyClient, inv.b * dxClient + inv.d * dyClient];
+  }, []);
 
   const snapPoint = useCallback(
     (p: Point, excludeId?: string): Point => {
@@ -785,17 +782,16 @@ export default function ManualCanvas({
 
   const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
 
-  // Expand viewBox so the floor badge (often in the export gutter) stays visible.
-  // With no background image (bg dims 0), frame the drawn content instead so tabs
-  // without a denah (e.g. imported after a quota-driven bg drop) still render.
-  const vbPad = badgeSrcR + 24;
-  const bbox = bg.width && bg.height ? null : contentBBox(project);
-  const contentW = bbox ? bbox.x1 + 24 : 0;
-  const contentH = bbox ? bbox.y1 + 24 : 0;
-  const vbMinX = Math.min(0, badgeSrcCx - vbPad);
-  const vbMinY = Math.min(0, badgeSrcCy - vbPad);
-  const vbMaxX = Math.max(bg.width || 1, contentW, badgeSrcCx + vbPad);
-  const vbMaxY = Math.max(bg.height || 1, contentH, badgeSrcCy + vbPad);
+  // Frame the export canvas (mapped into source space) unioned with the denah image
+  // bounds — NEVER the badge. The badge is clamped inside the canvas, so it is always
+  // visible here; keeping it out of the viewBox math means dragging the stamp can never
+  // resize or deform the map. With no denah, the export region alone frames the content.
+  const [vbTlX, vbTlY] = exportToSource(exportLayout, [0, 0]);
+  const [vbBrX, vbBrY] = exportToSource(exportLayout, [exportLayout.width, exportLayout.height]);
+  const vbMinX = Math.min(0, vbTlX);
+  const vbMinY = Math.min(0, vbTlY);
+  const vbMaxX = Math.max(bg.width || 1, vbBrX);
+  const vbMaxY = Math.max(bg.height || 1, vbBrY);
   const vbW = Math.max(1, vbMaxX - vbMinX);
   const vbH = Math.max(1, vbMaxY - vbMinY);
 
@@ -853,7 +849,7 @@ export default function ManualCanvas({
         ref={svgRef}
         className={`h-full w-full ${cursorClass}`}
         viewBox={`${vbMinX} ${vbMinY} ${vbW} ${vbH}`}
-        preserveAspectRatio="none"
+        preserveAspectRatio="xMidYMid meet"
         onWheel={onWheel}
         onContextMenu={onContextMenu}
         onMouseDown={(e) => {

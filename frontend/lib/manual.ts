@@ -777,20 +777,33 @@ export function defaultBadgeLayoutForCanvas(
   };
 }
 
+const clamp = (v: number, lo: number, hi: number): number => Math.min(hi, Math.max(lo, v));
+
 export function getBadgeLayout(project: ManualProject): ManualBadgeLayout {
   const dims = computeCanvasDims(project);
   const fallback = defaultBadgeLayoutForCanvas(dims.mode, dims.width, dims.planWidth, dims.gutter);
   const b = project.badgeLayout;
-  if (!b) return fallback;
+  const raw = b
+    ? {
+        cx: typeof b.cx === "number" && !Number.isNaN(b.cx) ? b.cx : fallback.cx,
+        cy: typeof b.cy === "number" && !Number.isNaN(b.cy) ? b.cy : fallback.cy,
+        r: Math.max(8, typeof b.r === "number" && !Number.isNaN(b.r) ? b.r : fallback.r),
+        fontSize: Math.max(8, typeof b.fontSize === "number" && !Number.isNaN(b.fontSize) ? b.fontSize : fallback.fontSize),
+        strokeWidth: Math.max(
+          1,
+          typeof b.strokeWidth === "number" && !Number.isNaN(b.strokeWidth) ? b.strokeWidth : fallback.strokeWidth,
+        ),
+      }
+    : fallback;
+  // The badge is a floor stamp — keep the whole circle inside the export canvas
+  // so it can never be clipped on export or fling the editor viewBox around.
+  const W = dims.width;
+  const H = dims.height;
+  const r = raw.r;
   return {
-    cx: typeof b.cx === "number" && !Number.isNaN(b.cx) ? b.cx : fallback.cx,
-    cy: typeof b.cy === "number" && !Number.isNaN(b.cy) ? b.cy : fallback.cy,
-    r: Math.max(8, typeof b.r === "number" && !Number.isNaN(b.r) ? b.r : fallback.r),
-    fontSize: Math.max(8, typeof b.fontSize === "number" && !Number.isNaN(b.fontSize) ? b.fontSize : fallback.fontSize),
-    strokeWidth: Math.max(
-      1,
-      typeof b.strokeWidth === "number" && !Number.isNaN(b.strokeWidth) ? b.strokeWidth : fallback.strokeWidth,
-    ),
+    ...raw,
+    cx: clamp(raw.cx, Math.min(r, W / 2), Math.max(W - r, W / 2)),
+    cy: clamp(raw.cy, Math.min(r, H / 2), Math.max(H - r, H / 2)),
   };
 }
 
