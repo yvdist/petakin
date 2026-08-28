@@ -37,6 +37,9 @@ const BRAND = "#0D9488";
 const BRAND_SOFT = "#0D948822";
 const DRAG_THRESH_PX = 4;
 const BADGE_STROKE = AEON_CONFIG.badge.stroke;
+const ZOOM_MIN = 0.05;
+const ZOOM_MAX = 40;
+const ZOOM_STEP = 1.25;
 
 export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "badge";
 
@@ -267,18 +270,56 @@ export default function ManualCanvas({
     return [prev[0] + Math.sign(dx) * m, prev[1] + Math.sign(dy) * m];
   }
 
-  const onWheel = useCallback(
-    (e: WheelEvent) => {
-      e.preventDefault();
-      const [mx, my] = clientToSvg(e.clientX, e.clientY);
+  const zoomToward = useCallback(
+    (nextScale: number, clientX?: number, clientY?: number) => {
+      const svg = svgRef.current;
+      let mx: number;
+      let my: number;
+      if (clientX != null && clientY != null) {
+        [mx, my] = clientToSvg(clientX, clientY);
+      } else if (svg) {
+        const rect = svg.getBoundingClientRect();
+        [mx, my] = clientToSvg(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      } else {
+        setView((v) => ({ ...v, scale: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextScale)) }));
+        return;
+      }
       setView((v) => {
-        const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-        const ns = Math.min(40, Math.max(0.05, v.scale * factor));
+        const ns = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextScale));
+        if (ns === v.scale) return v;
         const k = ns / v.scale;
         return { scale: ns, tx: mx - k * (mx - v.tx), ty: my - k * (my - v.ty) };
       });
     },
     [clientToSvg],
+  );
+
+  const resetView = useCallback(() => setView({ scale: 1, tx: 0, ty: 0 }), []);
+
+  const [zoomDraft, setZoomDraft] = useState(() => String(Math.round(view.scale * 100)));
+  useEffect(() => {
+    setZoomDraft(String(Math.round(view.scale * 100)));
+  }, [view.scale]);
+
+  const commitZoomPercent = useCallback(
+    (raw: string) => {
+      const pct = Number(raw);
+      if (!Number.isFinite(pct)) {
+        setZoomDraft(String(Math.round(viewRef.current.scale * 100)));
+        return;
+      }
+      zoomToward(pct / 100);
+    },
+    [zoomToward],
+  );
+
+  const onWheel = useCallback(
+    (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      zoomToward(viewRef.current.scale * factor, e.clientX, e.clientY);
+    },
+    [zoomToward],
   );
 
   const beginPan = (e: MouseEvent) => {
@@ -609,6 +650,21 @@ export default function ManualCanvas({
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd")) {
+        e.preventDefault();
+        zoomToward(viewRef.current.scale * ZOOM_STEP);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "-" || e.key === "_" || e.code === "Minus" || e.code === "NumpadSubtract")) {
+        e.preventDefault();
+        zoomToward(viewRef.current.scale / ZOOM_STEP);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
+        e.preventDefault();
+        resetView();
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.code === "Space") {
@@ -655,9 +711,7 @@ export default function ManualCanvas({
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
     };
-  }, [drawingPolyLike, closePoly, onSelectVert]);
-
-  const resetView = () => setView({ scale: 1, tx: 0, ty: 0 });
+  }, [drawingPolyLike, closePoly, onSelectVert, zoomToward, resetView]);
 
   const beginVertexDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
     e.stopPropagation();
@@ -820,13 +874,51 @@ export default function ManualCanvas({
 
   return (
     <div className="relative h-full w-full overflow-hidden checkerboard">
-      <div className="absolute right-3 top-3 z-10 flex gap-2">
-        <button onClick={resetView} className="rounded bg-white/90 px-2 py-1 text-xs shadow ring-1 ring-neutral-300">
-          Reset view
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded bg-white/90 p-0.5 text-xs shadow ring-1 ring-neutral-300">
+        <button
+          type="button"
+          onClick={() => zoomToward(view.scale / ZOOM_STEP)}
+          className="rounded px-1.5 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Zoom out (⌘−)"
+        >
+          −
         </button>
-        <span className="rounded bg-white/90 px-2 py-1 text-xs shadow ring-1 ring-neutral-300">
-          {Math.round(view.scale * 100)}%
-        </span>
+        <form
+          className="flex items-center"
+          onSubmit={(e) => {
+            e.preventDefault();
+            commitZoomPercent(zoomDraft);
+          }}
+        >
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={zoomDraft}
+            onChange={(e) => setZoomDraft(e.target.value)}
+            onBlur={() => commitZoomPercent(zoomDraft)}
+            className="w-12 bg-transparent px-0.5 py-1 text-center font-mono outline-none"
+            title="Zoom percent"
+            aria-label="Zoom percent"
+          />
+          <span className="pr-1 text-neutral-500">%</span>
+        </form>
+        <button
+          type="button"
+          onClick={() => zoomToward(view.scale * ZOOM_STEP)}
+          className="rounded px-1.5 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Zoom in (⌘=)"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={resetView}
+          className="rounded px-2 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Fit view (⌘0)"
+        >
+          Fit
+        </button>
       </div>
 
       {draftPaused && poly && (
