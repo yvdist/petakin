@@ -11,19 +11,23 @@ import {
   exportToSource,
   flattenPolyVertsOpen,
   getDrawOpacity,
+  getLineDefaults,
   getShellStroke,
   getStroke,
   insertVertOnEdge,
+  isLineShape,
   isShapeLocked,
   isShapeVisible,
   nearestEdge,
   orderedShapeIds,
   pathDFromVerts,
   pickBendEdge,
+  shapeLineStroke,
   shapeVerts,
   shellVertsOf,
   sourceToExport,
   syncShapeFromVerts,
+  dashArray,
   SHELL_ID,
   type ManualBadgeLayout,
   type ManualProject,
@@ -41,7 +45,7 @@ const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 40;
 const ZOOM_STEP = 1.25;
 
-export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "badge";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "line" | "badge";
 
 interface Props {
   project: ManualProject;
@@ -64,7 +68,7 @@ interface Props {
 type View = { scale: number; tx: number; ty: number };
 
 type PolyDraft = {
-  kind: "poly" | "shell";
+  kind: "poly" | "shell" | "line";
   verts: PolyVert[];
   cur: Point;
 };
@@ -198,7 +202,7 @@ export default function ManualCanvas({
   useEffect(() => {
     setRectDraft(null);
     setPlacing(null);
-    if ((tool === "poly" || tool === "shell") && polyRef.current) {
+    if ((tool === "poly" || tool === "shell" || tool === "line") && polyRef.current) {
       setPoly((p) => (p ? { ...p, kind: tool } : p));
     }
   }, [tool]);
@@ -339,8 +343,13 @@ export default function ManualCanvas({
     moved.current = false;
   };
 
-  const drawingPolyLike = tool === "poly" || tool === "shell";
+  const drawingPolyLike = tool === "poly" || tool === "shell" || tool === "line";
   const draftPaused = !!poly && !drawingPolyLike;
+  const ringClosed = (id: string) => {
+    if (id === SHELL_ID) return true;
+    const s = shapes.find((x) => x.id === id);
+    return !s || !isLineShape(s);
+  };
 
   const commitVerts = useCallback(
     (id: string, verts: PolyVert[]) => {
@@ -352,7 +361,8 @@ export default function ManualCanvas({
 
   const commitPolyPlace = useCallback(
     (anchor: Point, handleOut: Point | undefined, clientDist: number) => {
-      const kind = tool === "shell" ? "shell" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
+      const kind =
+        tool === "shell" ? "shell" : tool === "line" ? "line" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
       const vert: PolyVert =
         clientDist > DRAG_THRESH_PX && handleOut ? { p: anchor, handleOut } : { p: anchor };
       setPoly((prev) => {
@@ -387,7 +397,7 @@ export default function ManualCanvas({
       const maxDist = bendHitRadius(view.scale);
       const tryBend = (id: string, verts: PolyVert[]) => {
         const prefer = id === selectedId ? selectedVertIndex : null;
-        const edge = pickBendEdge(c, verts, maxDist, prefer);
+        const edge = pickBendEdge(c, verts, maxDist, prefer, ringClosed(id));
         if (!edge) return false;
         onSelect(id);
         onSelectVert(edge.index);
@@ -620,7 +630,7 @@ export default function ManualCanvas({
 
     let hit: { id: string; edgeIndex: number; q: Point; dist: number } | null = null;
     for (const cand of candidates) {
-      const edge = nearestEdge(c, cand.verts, maxDist);
+      const edge = nearestEdge(c, cand.verts, maxDist, ringClosed(cand.id));
       if (edge && (!hit || edge.dist < hit.dist)) {
         hit = { id: cand.id, edgeIndex: edge.index, q: edge.q, dist: edge.dist };
       }
@@ -641,15 +651,19 @@ export default function ManualCanvas({
     polyRef.current = null;
     setPoly(null);
     setPlacing(null);
-    if (prev && prev.verts.length >= 3) {
+    if (prev && (prev.kind === "line" ? prev.verts.length >= 2 : prev.verts.length >= 3)) {
       const synced = syncShapeFromVerts(prev.verts);
-      if (synced.points.length >= 3) {
-        if (prev.kind === "shell") {
+      if (prev.kind === "shell") {
+        if (synced.points.length >= 3) {
           onSetShell(synced.verts);
           onSelect(SHELL_ID);
-        } else {
-          onAddShape(makeShape("poly", synced.points, synced.verts));
         }
+      } else if (prev.kind === "line") {
+        if (synced.points.length >= 2) {
+          onAddShape(makeShape("line", synced.points, synced.verts));
+        }
+      } else if (synced.points.length >= 3) {
+        onAddShape(makeShape("poly", synced.points, synced.verts));
       }
     }
   }, [onAddShape, makeShape, onSetShell, onSelect]);
@@ -759,7 +773,7 @@ export default function ManualCanvas({
       }
       const c = toContent(e.clientX, e.clientY);
       const prefer = id === selectedId ? selectedVertIndex : null;
-      const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer);
+      const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer, ringClosed(id));
       if (edge) {
         onSelect(id);
         onSelectVert(edge.index);
@@ -840,7 +854,12 @@ export default function ManualCanvas({
       ? "cursor-default active:cursor-grabbing"
       : "cursor-crosshair";
 
-  const previewStroke = poly?.kind === "shell" || tool === "shell" ? "#111827" : BRAND;
+  const previewStroke =
+    poly?.kind === "shell" || tool === "shell"
+      ? "#111827"
+      : poly?.kind === "line" || tool === "line"
+        ? getLineDefaults(project).color
+        : BRAND;
 
   // Frame the export canvas (mapped into source space) unioned with the denah image
   // bounds — NEVER the badge. The badge is clamped inside the canvas, so it is always
@@ -930,14 +949,14 @@ export default function ManualCanvas({
       {draftPaused && poly && (
         <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink/90 px-3 py-1.5 text-xs text-white shadow">
           <span>
-            {poly.kind === "shell" ? "Shell" : "Polygon"} in progress ({poly.verts.length} pts)
+            {poly.kind === "shell" ? "Shell" : poly.kind === "line" ? "Line" : "Polygon"} in progress ({poly.verts.length} pts)
           </span>
           <button
             type="button"
             className="rounded bg-brand px-2 py-0.5 font-medium text-white"
             onClick={() => onRequestTool?.(poly.kind)}
           >
-            Continue ({poly.kind === "shell" ? "O" : "P"})
+            Continue ({poly.kind === "shell" ? "O" : poly.kind === "line" ? "L" : "P"})
           </button>
           <span className="text-white/60">Esc cancel · Space pan</span>
         </div>
@@ -1003,6 +1022,26 @@ export default function ManualCanvas({
             <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
               {paintOrder.map((s) => {
                 const verts = liveVertsFor(s.id, shapeVerts(s));
+                if (isLineShape(s)) {
+                  const isSel = s.id === selectedId;
+                  const isHov = hovered === s.id;
+                  const ls = shapeLineStroke(s, project);
+                  const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
+                  const sw = isSel ? ls.width * 1.6 : ls.width;
+                  return (
+                    <path
+                      key={`f-${s.id}`}
+                      d={pathDFromVerts(verts, false)}
+                      fill="none"
+                      stroke={stroke}
+                      strokeWidth={sw}
+                      strokeDasharray={dashArray(sw, s.dash)}
+                      strokeLinejoin="round"
+                      strokeLinecap="round"
+                      pointerEvents="none"
+                    />
+                  );
+                }
                 return (
                   <path
                     key={`f-${s.id}`}
@@ -1014,6 +1053,7 @@ export default function ManualCanvas({
                 );
               })}
               {paintOrder.map((s) => {
+                if (isLineShape(s)) return null;
                 const verts = liveVertsFor(s.id, shapeVerts(s));
                 const isSel = s.id === selectedId;
                 const isHov = hovered === s.id;
@@ -1054,6 +1094,25 @@ export default function ManualCanvas({
             paintOrder.map((s) => {
               const verts = liveVertsFor(s.id, shapeVerts(s));
               const locked = isShapeLocked(project, s.id);
+              if (isLineShape(s)) {
+                const ls = shapeLineStroke(s, project);
+                return (
+                  <path
+                    key={`h-${s.id}`}
+                    d={pathDFromVerts(verts, false)}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth={Math.max(ls.width, 12 / view.scale)}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={locked ? "cursor-default" : "cursor-move"}
+                    onMouseEnter={() => setHovered(s.id)}
+                    onMouseLeave={() => setHovered(null)}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => beginMove(e, verts, s.id)}
+                  />
+                );
+              }
               return (
                 <path
                   key={`h-${s.id}`}
@@ -1285,7 +1344,11 @@ export default function ManualCanvas({
 
       {drawingPolyLike && (poly || placing) && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
-          {poly?.kind === "shell" || tool === "shell" ? "Shell" : "Polygon"} ·{" "}
+          {poly?.kind === "shell" || tool === "shell"
+            ? "Shell"
+            : poly?.kind === "line" || tool === "line"
+              ? "Line"
+              : "Polygon"} ·{" "}
           {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
           pan · ⌘Z undo · Enter close · Esc cancel
         </div>

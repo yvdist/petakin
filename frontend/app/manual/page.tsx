@@ -26,6 +26,7 @@ import {
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
   DEFAULT_SHELL_STROKE,
+  DEFAULT_LINE_STROKE,
   DEFAULT_EXPORT_TARGET_H,
   DEFAULT_EXPORT_TARGET_W,
   DEFAULT_PNG_SCALE,
@@ -51,9 +52,11 @@ import {
   getExportTargetH,
   getExportTargetW,
   getLayerTree,
+  getLineDefaults,
   getPngScale,
   getShellStroke,
   getStroke,
+  isLineShape,
   groupNodes,
   insertLeafForShape,
   isManualProject,
@@ -130,6 +133,13 @@ function ToolIcon({ name }: { name: Tool }) {
       return (
         <svg {...common} aria-hidden>
           <path d="M12 3l8 6.5-3 9.5H7L4 9.5z" />
+        </svg>
+      );
+    case "line":
+      return (
+        <svg {...common} aria-hidden>
+          <path d="M4 18l5-8 4 5 7-11" />
+          <path d="M4 18l5-8" strokeDasharray="2 2" />
         </svg>
       );
     case "badge":
@@ -412,15 +422,28 @@ export default function ManualPage() {
 
   // ---- shape ops ----
   const makeShape = useCallback(
-    (kind: ShapeKind, points: Point[], verts?: PolyVert[]): ManualShape => ({
-      id: newShapeId(),
-      kind,
-      points,
-      verts,
-      category: drawCat,
-      fill: defaultFill(drawCat),
-    }),
-    [drawCat],
+    (kind: ShapeKind, points: Point[], verts?: PolyVert[]): ManualShape => {
+      const base: ManualShape = {
+        id: newShapeId(),
+        kind,
+        points,
+        verts,
+        category: drawCat,
+        fill: defaultFill(drawCat),
+      };
+      if (kind === "line") {
+        const d = getLineDefaults(project);
+        return {
+          ...base,
+          category: "specialty",
+          fill: "none",
+          stroke: { color: d.color, width: d.width },
+          dash: d.dash,
+        };
+      }
+      return base;
+    },
+    [drawCat, project],
   );
 
   const addShape = useCallback(
@@ -488,9 +511,10 @@ export default function ManualPage() {
             return s ? shapeVerts(s) : null;
           })();
     if (!verts) return;
-    const next = removeVert(verts, selectedVertIndex);
+    const line = selectedId !== SHELL_ID && project.shapes.find((x) => x.id === selectedId)?.kind === "line";
+    const next = removeVert(verts, selectedVertIndex, line ? 2 : 3);
     if (!next) {
-      window.alert("Need at least 3 points");
+      window.alert(line ? "Need at least 2 points" : "Need at least 3 points");
       return;
     }
     if (selectedId === SHELL_ID) {
@@ -557,7 +581,7 @@ export default function ManualPage() {
       };
       setSelectedId(copy.id);
       setSelectedVertIndex(null);
-      return { ...p, shapes: [...p.shapes, copy] };
+      return insertLeafForShape({ ...p, shapes: [...p.shapes, copy] }, copy.id);
     }, { label: "Duplicate" });
   }, [selectedId, updateActive]);
 
@@ -590,6 +614,20 @@ export default function ManualPage() {
       label: "Shell width",
       history: "coalesce",
     });
+  const lineDefaults = getLineDefaults(project);
+  const setLineDefault = (patch: Partial<ReturnType<typeof getLineDefaults>>) =>
+    updateActive(
+      (p) => ({ ...p, lineDefaults: { ...getLineDefaults(p), ...patch } }),
+      { label: "Line style", history: "coalesce" },
+    );
+  const patchLineShape = (id: string, patch: Pick<ManualShape, "stroke" | "dash">) =>
+    updateActive(
+      (p) => ({
+        ...p,
+        shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+      }),
+      { label: "Edit line", history: "coalesce" },
+    );
 
   // ---- layers (recursive node tree) ----
   const activeContainerId = useMemo(
@@ -956,8 +994,9 @@ export default function ManualPage() {
       else if (e.key === "r" || e.key === "R") setTool("rect");
       else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
+      else if (e.key === "l" || e.key === "L") setTool("line");
       else if (e.key === "o" || e.key === "O" || e.key === "s" || e.key === "S") setTool("shell");
-      else if (e.key === "b" || e.key === "B") setTool("badge");
+      else if (e.key === "f" || e.key === "F") setTool("badge");
       else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         if (selectedVertIndex != null) deleteVert();
@@ -1001,7 +1040,8 @@ export default function ManualPage() {
     { key: "rect", label: "Rect", hint: "R" },
     { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
-    { key: "badge", label: "Badge", hint: "B" },
+    { key: "line", label: "Line", hint: "L" },
+    { key: "badge", label: "Badge", hint: "F" },
   ];
 
   return (
@@ -1112,21 +1152,25 @@ export default function ManualPage() {
                 </button>
               ))}
             </div>
-            <div className="mb-2 text-xs text-neutral-600">Draw as</div>
-            <div className="mb-3 flex flex-wrap gap-1">
-              {DRAW_CATEGORIES.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setDrawCat(c)}
-                  className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                    drawCat === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
-                  }`}
-                >
-                  <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
-                  {CATEGORY_LABEL[c]}
-                </button>
-              ))}
-            </div>
+            {tool !== "line" && (
+              <>
+                <div className="mb-2 text-xs text-neutral-600">Draw as</div>
+                <div className="mb-3 flex flex-wrap gap-1">
+                  {DRAW_CATEGORIES.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setDrawCat(c)}
+                      className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
+                        drawCat === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
+                      }`}
+                    >
+                      <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
+                      {CATEGORY_LABEL[c]}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
             <label className="flex items-center gap-2 text-xs text-neutral-700">
               <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} className="accent-brand" />
               Snap
@@ -1258,32 +1302,117 @@ export default function ManualPage() {
             </Section>
           )}
 
+          {(tool === "line" || (selShape && isLineShape(selShape))) && (() => {
+            const editing = !!(selShape && isLineShape(selShape));
+            const color = editing ? (selShape!.stroke?.color ?? lineDefaults.color) : lineDefaults.color;
+            const width = editing ? (selShape!.stroke?.width ?? lineDefaults.width) : lineDefaults.width;
+            const dash = editing ? (selShape!.dash ?? "solid") : lineDefaults.dash;
+            const apply = (patch: { color?: string; width?: number; dash?: "solid" | "dash" }) => {
+              const next = {
+                color: patch.color ?? color,
+                width: patch.width ?? width,
+                dash: patch.dash ?? dash,
+              };
+              if (editing && selShape) {
+                patchLineShape(selShape.id, {
+                  stroke: { color: next.color, width: next.width },
+                  dash: next.dash,
+                });
+              } else {
+                setLineDefault(next);
+              }
+            };
+            return (
+              <Section title="Line">
+                <p className="mb-2 text-xs text-neutral-600">
+                  {editing
+                    ? "Stroke of the selected line."
+                    : "Default for new lines. Click/drag on canvas · Enter to finish (2+ points)."}
+                </p>
+                <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                  Color
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => apply({ color: e.target.value })}
+                    className="h-6 w-10 rounded border border-neutral-300"
+                  />
+                </label>
+                <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                  Width
+                  <input
+                    type="range"
+                    min={1}
+                    max={24}
+                    step={1}
+                    value={width}
+                    onChange={(e) => apply({ width: Number(e.target.value) })}
+                    className="w-24 accent-brand"
+                  />
+                  <span className="w-6 font-mono">{width}</span>
+                  px
+                </label>
+                <div className="mb-2 flex gap-1">
+                  {(["solid", "dash"] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => apply({ dash: d })}
+                      className={`flex-1 rounded px-2 py-1 text-xs capitalize ${
+                        dash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="text-[11px] text-neutral-500 hover:underline"
+                  onClick={() =>
+                    apply({
+                      color: DEFAULT_LINE_STROKE.color,
+                      width: DEFAULT_LINE_STROKE.width,
+                      dash: "solid",
+                    })
+                  }
+                >
+                  Reset to dark / 3px / solid
+                </button>
+              </Section>
+            );
+          })()}
+
           {selShape && (
             <Section title="Shape" right={<span className="text-xs text-neutral-400">{selShape.kind}</span>}>
-              <div className="mb-2 text-xs text-neutral-600">Category</div>
-              <div className="mb-3 flex flex-wrap gap-1">
-                {DRAW_CATEGORIES.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => patchShape(selShape.id, { category: c, fill: defaultFill(c) })}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                      selShape.category === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
-                    }`}
-                  >
-                    <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
-                    {CATEGORY_LABEL[c]}
-                  </button>
-                ))}
-              </div>
-              <label className="mb-2 flex items-center justify-between text-xs">
-                Fill override
-                <input
-                  type="color"
-                  value={selShape.fill}
-                  onChange={(e) => patchShape(selShape.id, { fill: e.target.value })}
-                  className="h-6 w-10 rounded border border-neutral-300"
-                />
-              </label>
+              {!isLineShape(selShape) && (
+                <>
+                  <div className="mb-2 text-xs text-neutral-600">Category</div>
+                  <div className="mb-3 flex flex-wrap gap-1">
+                    {DRAW_CATEGORIES.map((c) => (
+                      <button
+                        key={c}
+                        onClick={() => patchShape(selShape.id, { category: c, fill: defaultFill(c) })}
+                        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
+                          selShape.category === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
+                        }`}
+                      >
+                        <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
+                        {CATEGORY_LABEL[c]}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mb-2 flex items-center justify-between text-xs">
+                    Fill override
+                    <input
+                      type="color"
+                      value={selShape.fill}
+                      onChange={(e) => patchShape(selShape.id, { fill: e.target.value })}
+                      className="h-6 w-10 rounded border border-neutral-300"
+                    />
+                  </label>
+                </>
+              )}
               <label className="mb-3 block text-xs">
                 Name
                 <input
@@ -1579,6 +1708,8 @@ export default function ManualPage() {
               {tool === "ellipse" && "Drag to draw oval · Shift = circle"}
               {tool === "poly" &&
                 "Click = corner · drag = curve · exact cursor · Space = pan"}
+              {tool === "line" &&
+                "Click = corner · drag = curve · Enter finish (2+ pts) · exact cursor · Space = pan"}
               {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
