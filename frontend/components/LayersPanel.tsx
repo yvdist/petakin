@@ -1,13 +1,16 @@
 "use client";
 import { useCallback, useState } from "react";
+import type { Category } from "@/lib/types";
 import type { ManualNode, ManualProject, ManualShape } from "@/lib/manual";
 import {
   collectDescendantIds,
   findNode,
   getLayerTree,
+  isBorderGroup,
   isNodeLocked,
   isNodeVisible,
 } from "@/lib/manual";
+import ContextMenu, { colorSwatchItems, type MenuItem } from "@/components/ContextMenu";
 
 type DropPos = "before" | "after" | "into";
 
@@ -29,6 +32,13 @@ type Props = {
   /** Move node under parentId (null = root) at model index. */
   onMoveNode: (id: string, parentId: string | null, index: number) => void;
   onCollapseAll: (collapsed: boolean) => void;
+  onDuplicateNode?: (id: string) => void;
+  onRecolorNode?: (id: string, category: Category) => void;
+  onReorderNode?: (id: string, dir: "front" | "back") => void;
+  onFillBorderGroup?: (id: string, category: Category) => void;
+  onSelectBorderGroupMembers?: (id: string) => void;
+  onDeleteNode?: (id: string) => void;
+  onUngroupNode?: (id: string) => void;
 };
 
 function EyeIcon({ on }: { on: boolean }) {
@@ -75,6 +85,7 @@ function shapeLabel(s: ManualShape): string {
 function nodeLabel(node: ManualNode, shapeMap: Map<string, ManualShape>): string {
   if (node.kind === "container") {
     if (node.borderId) return node.name?.trim() || "Border";
+    if (node.borderGroup) return node.name?.trim() || "Border group";
     return node.name || "Group";
   }
   if (node.name?.trim()) return node.name.trim();
@@ -98,12 +109,20 @@ export default function LayersPanel({
   onSetActiveContainer,
   onMoveNode,
   onCollapseAll,
+  onDuplicateNode,
+  onRecolorNode,
+  onReorderNode,
+  onFillBorderGroup,
+  onSelectBorderGroupMembers,
+  onDeleteNode,
+  onUngroupNode,
 }: Props) {
   const tree = getLayerTree(project);
   const shapeMap = new Map(project.shapes.map((s) => [s.id, s]));
 
   const [dragId, setDragId] = useState<string | null>(null);
   const [hint, setHint] = useState<{ targetId: string; pos: DropPos } | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null);
 
   const clearDrag = useCallback(() => {
     setDragId(null);
@@ -231,6 +250,15 @@ export default function LayersPanel({
               if (isContainer) onSetActiveContainer(node.id);
             }}
             onDoubleClick={() => onRenameNode(node.id)}
+            onContextMenu={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              if (!selectedIds.includes(node.id)) {
+                onSelectNode(node.id, e);
+                if (isContainer) onSetActiveContainer(node.id);
+              }
+              setMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
+            }}
           >
             {isContainer && node.children.length > 0 ? (
               <button
@@ -274,6 +302,13 @@ export default function LayersPanel({
                 className="ml-0.5 h-2.5 w-2.5 shrink-0 rounded-sm ring-1 ring-black/10"
                 style={{ background: leafShape.fill }}
               />
+            ) : node.kind === "container" && node.borderGroup ? (
+              <span className="ml-0.5 shrink-0 text-neutral-400" title="Border group">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <rect x="2" y="5" width="12" height="12" rx="1" strokeDasharray="3 2" />
+                  <rect x="10" y="7" width="12" height="12" rx="1" strokeDasharray="3 2" />
+                </svg>
+              </span>
             ) : node.kind === "container" && node.borderId ? (
               <span className="ml-0.5 shrink-0 text-neutral-400" title="Border">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -304,8 +339,99 @@ export default function LayersPanel({
 
   const rootDisplay = [...tree.root].reverse();
 
+  const menuItemsFor = (nodeId: string): MenuItem[] => {
+    const f = findNode(tree, nodeId);
+    if (!f) return [];
+    const n = f.node;
+    const vis = isNodeVisible(project, n.id);
+    const locked = isNodeLocked(project, n.id);
+    const items: MenuItem[] = [];
+    if (n.kind === "leaf") {
+      items.push({ type: "item", label: "Rename", onClick: () => onRenameNode(n.id) });
+      items.push({ type: "item", label: "Duplicate", onClick: () => onDuplicateNode?.(n.id) });
+      items.push({
+        type: "item",
+        label: "Recolor",
+        submenu: colorSwatchItems((cat) => onRecolorNode?.(n.id, cat)),
+      });
+      items.push({ type: "item", label: "Bring to front", onClick: () => onReorderNode?.(n.id, "front") });
+      items.push({ type: "item", label: "Send to back", onClick: () => onReorderNode?.(n.id, "back") });
+      if (canGroup && selectedIds.length >= 2) {
+        items.push({ type: "item", label: "Group selection", onClick: onGroup });
+      }
+      items.push({ type: "separator" });
+      items.push({
+        type: "item",
+        label: vis ? "Hide" : "Show",
+        onClick: () => onToggleVisible(n.id),
+      });
+      items.push({
+        type: "item",
+        label: locked ? "Unlock" : "Lock",
+        onClick: () => onToggleLocked(n.id),
+      });
+      items.push({ type: "separator" });
+      items.push({ type: "item", label: "Delete", danger: true, onClick: () => onDeleteNode?.(n.id) });
+      return items;
+    }
+    if (isBorderGroup(n)) {
+      items.push({
+        type: "item",
+        label: "Fill",
+        submenu: colorSwatchItems((cat) => onFillBorderGroup?.(n.id, cat)),
+      });
+      items.push({
+        type: "item",
+        label: "Select all borders",
+        onClick: () => onSelectBorderGroupMembers?.(n.id),
+      });
+      items.push({ type: "item", label: "Rename", onClick: () => onRenameNode(n.id) });
+      items.push({ type: "item", label: "Ungroup", onClick: () => onUngroupNode?.(n.id) });
+      items.push({ type: "separator" });
+      items.push({
+        type: "item",
+        label: vis ? "Hide" : "Show",
+        onClick: () => onToggleVisible(n.id),
+      });
+      items.push({
+        type: "item",
+        label: locked ? "Unlock" : "Lock",
+        onClick: () => onToggleLocked(n.id),
+      });
+      items.push({ type: "separator" });
+      items.push({ type: "item", label: "Delete", danger: true, onClick: () => onDeleteNode?.(n.id) });
+      return items;
+    }
+    // Border or plain group
+    items.push({ type: "item", label: "Rename", onClick: () => onRenameNode(n.id) });
+    items.push({ type: "item", label: "New group", onClick: onNewContainer });
+    if (canGroup) items.push({ type: "item", label: "Group selection", onClick: onGroup });
+    items.push({ type: "item", label: "Ungroup", onClick: () => onUngroupNode?.(n.id) });
+    items.push({
+      type: "item",
+      label: "Set as active",
+      onClick: () => onSetActiveContainer(n.id),
+    });
+    items.push({ type: "item", label: "Bring to front", onClick: () => onReorderNode?.(n.id, "front") });
+    items.push({ type: "item", label: "Send to back", onClick: () => onReorderNode?.(n.id, "back") });
+    items.push({ type: "separator" });
+    items.push({
+      type: "item",
+      label: vis ? "Hide" : "Show",
+      onClick: () => onToggleVisible(n.id),
+    });
+    items.push({
+      type: "item",
+      label: locked ? "Unlock" : "Lock",
+      onClick: () => onToggleLocked(n.id),
+    });
+    items.push({ type: "separator" });
+    items.push({ type: "item", label: "Delete", danger: true, onClick: () => onDeleteNode?.(n.id) });
+    return items;
+  };
+
   return (
-    <div>
+    <div onContextMenu={(e) => e.preventDefault()}>
       <div className="mb-2 flex flex-wrap gap-1">
         <button
           type="button"
@@ -320,7 +446,15 @@ export default function LayersPanel({
           onClick={onGroup}
           disabled={!canGroup}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300 disabled:opacity-40"
-          title="Group selection (⌘G)"
+          title={
+            selectedIds.length >= 2 &&
+            selectedIds.every((id) => {
+              const f = findNode(tree, id);
+              return !!f && f.node.kind === "container" && !!f.node.borderId;
+            })
+              ? "Group borders into a clip set (⌘G)"
+              : "Group selection (⌘G)"
+          }
         >
           Group
         </button>
@@ -376,8 +510,16 @@ export default function LayersPanel({
         {rootDisplay.map((n) => renderNode(n, 0))}
       </div>
       <p className="mt-1 text-[10px] text-neutral-400">
-        Drag to reorder (top = front) · drop onto a group to nest · ⌘/Ctrl+click multi · lock = no drag
+        Drag to reorder (top = front) · drop onto a group to nest · ⌘/Ctrl+click multi · lock = no drag · right-click for actions
       </p>
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItemsFor(menu.nodeId)}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </div>
   );
 }

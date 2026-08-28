@@ -121,6 +121,8 @@ export interface ManualContainerNode extends ManualNodeCommon {
   children: ManualNode[];
   /** When set, this container is a Border region (geometry in project.borders). */
   borderId?: string;
+  /** Clip direct children to the union of child Border polygons. */
+  borderGroup?: boolean;
 }
 
 export interface ManualLeafNode extends ManualNodeCommon {
@@ -224,6 +226,17 @@ function pruneDeadLeaves(nodes: ManualNode[], shapeIds: Set<string>): ManualNode
 function countContainers(nodes: ManualNode[]): number {
   let c = 0;
   for (const n of nodes) if (n.kind === "container") c += 1 + countContainers(n.children);
+  return c;
+}
+
+function countBorderGroups(nodes: ManualNode[]): number {
+  let c = 0;
+  for (const n of nodes) {
+    if (n.kind === "container") {
+      if (n.borderGroup) c += 1;
+      c += countBorderGroups(n.children);
+    }
+  }
   return c;
 }
 
@@ -558,23 +571,33 @@ export function createContainer(
   return { ...p, layerTree: { ...tree, root, activeContainerId: node.id } };
 }
 
-/** Add a leaf for a shape into the active container (or root front). No-op if it exists. */
+/**
+ * Add a leaf for a shape into the active container (or root front).
+ * Uses the raw tree so reconcileTree cannot dump a missing leaf at root first.
+ */
 export function insertLeafForShape(project: ManualProject, shapeId: string): ManualProject {
-  const p = ensureLayerTree(project);
-  const tree = p.layerTree!;
-  if (leafForShape(tree, shapeId)) return p;
-  const leaf = makeLeaf(shapeId);
-  const active = tree.activeContainerId ? findNode(tree, tree.activeContainerId) : null;
-  if (active && active.node.kind === "container") {
-    const root = insertNodeInto(
-      tree.root,
-      tree.activeContainerId,
-      active.node.children.length,
-      leaf,
-    );
-    return { ...p, layerTree: { ...tree, root } };
+  const raw = project.layerTree as unknown;
+  const tree: ManualLayerTree =
+    raw && !isLegacyTree(raw) ? (raw as ManualLayerTree) : getLayerTree(project);
+  const existing = leafForShape(tree, shapeId);
+  const activeId = tree.activeContainerId;
+  const active = activeId ? findNode(tree, activeId) : null;
+  const parentId = active && active.node.kind === "container" ? activeId : null;
+
+  if (existing) {
+    const loc = findNode(tree, existing.id);
+    const currentParent = loc?.parent?.id ?? null;
+    if (!parentId || currentParent === parentId) return ensureLayerTree(project);
+    const destIndex = active && active.node.kind === "container" ? active.node.children.length : 0;
+    return moveNode({ ...project, layerTree: tree }, existing.id, parentId, destIndex);
   }
-  return { ...p, layerTree: { ...tree, root: [...tree.root, leaf] } };
+
+  const leaf = makeLeaf(shapeId);
+  const root =
+    parentId && active && active.node.kind === "container"
+      ? insertNodeInto(tree.root, parentId, active.node.children.length, leaf)
+      : [...tree.root, leaf];
+  return ensureLayerTree({ ...project, layerTree: { ...tree, root } });
 }
 
 export function removeLeafForShape(project: ManualProject, shapeId: string): ManualProject {
@@ -742,14 +765,21 @@ export function groupNodes(project: ManualProject, selectedIds: string[]): Manua
 
   const first = findNode(tree0, top[0])!;
   const parentId = first.parent ? first.parent.id : null;
+  const allBorders = top.every((id) => {
+    const loc = findNode(tree0, id);
+    return !!loc && loc.node.kind === "container" && !!loc.node.borderId;
+  });
   const container: ManualContainerNode = {
     id: newNodeId("g"),
     kind: "container",
-    name: `Group ${countContainers(tree0.root) + 1}`,
+    name: allBorders
+      ? `Border group ${countBorderGroups(tree0.root) + 1}`
+      : `Group ${countContainers(tree0.root) + 1}`,
     locked: false,
     visible: true,
     collapsed: false,
     children: [],
+    ...(allBorders ? { borderGroup: true } : {}),
   };
   let p: ManualProject = {
     ...p0,
@@ -891,6 +921,194 @@ export function containerForBorder(project: ManualProject, borderId: string): Ma
 export function borderIdForNode(project: ManualProject, nodeId: string): string | null {
   const f = findNode(getLayerTree(project), nodeId);
   return f && f.node.kind === "container" ? f.node.borderId ?? null : null;
+}
+
+export function isBorderGroup(node: ManualNode | null | undefined): boolean {
+  return !!node && node.kind === "container" && !!node.borderGroup;
+}
+
+export function collectBorderGroupNodes(nodes: ManualNode[]): ManualContainerNode[] {
+  const out: ManualContainerNode[] = [];
+  for (const n of nodes) {
+    if (n.kind !== "container") continue;
+    if (n.borderGroup) out.push(n);
+    out.push(...collectBorderGroupNodes(n.children));
+  }
+  return out;
+}
+
+export function directChildBorders(project: ManualProject, node: ManualContainerNode): ManualBorder[] {
+  const out: ManualBorder[] = [];
+  for (const c of node.children) {
+    if (c.kind !== "container" || !c.borderId) continue;
+    const b = borderById(project, c.borderId);
+    if (b) out.push(b);
+  }
+  return out;
+}
+
+/** Member Border-container node ids of a Border group (not nested descendants). */
+export function borderGroupMemberNodeIds(project: ManualProject, groupId: string): string[] {
+  const loc = findNode(getLayerTree(project), groupId);
+  if (!loc || loc.node.kind !== "container" || !loc.node.borderGroup) return [];
+  return loc.node.children.filter((c) => c.kind === "container" && !!c.borderId).map((c) => c.id);
+}
+
+/** The node itself if it is a Border group, else the nearest ancestor group. */
+export function enclosingBorderGroup(
+  project: ManualProject,
+  nodeId: string,
+): ManualContainerNode | null {
+  const loc = findNode(getLayerTree(project), nodeId);
+  if (!loc) return null;
+  if (loc.node.kind === "container" && loc.node.borderGroup) return loc.node;
+  for (let i = loc.ancestors.length - 1; i >= 0; i--) {
+    if (loc.ancestors[i].borderGroup) return loc.ancestors[i];
+  }
+  return null;
+}
+
+/** Bring a node to the front (last model index) or send it to the back (index 0) among siblings. */
+export function reorderNodeInParent(
+  project: ManualProject,
+  nodeId: string,
+  dir: "front" | "back",
+): ManualProject {
+  const loc = findNode(getLayerTree(project), nodeId);
+  if (!loc) return project;
+  const parentId = loc.parent ? loc.parent.id : null;
+  const siblings = loc.parent ? loc.parent.children : getLayerTree(project).root;
+  const index = dir === "front" ? siblings.length : 0;
+  return moveNode(project, nodeId, parentId, index);
+}
+
+/**
+ * Remove a node and everything it owns (descendant shapes + borders).
+ * Unlike deleteContainers / deleteBorder, children are not promoted.
+ */
+export function deleteNodeDeep(project: ManualProject, nodeId: string): ManualProject {
+  const p = ensureLayerTree(project);
+  const loc = findNode(getLayerTree(p), nodeId);
+  if (!loc) return p;
+  const shapeIds = new Set<string>();
+  const borderIds = new Set<string>();
+  const walk = (n: ManualNode) => {
+    if (n.kind === "leaf") shapeIds.add(n.shapeId);
+    else {
+      if (n.borderId) borderIds.add(n.borderId);
+      for (const c of n.children) walk(c);
+    }
+  };
+  walk(loc.node);
+  const { nodes: root } = removeNodeFrom(getLayerTree(p).root, nodeId);
+  const tree = getLayerTree(p);
+  const desc = collectDescendantIds(loc.node);
+  const active = tree.activeContainerId;
+  const activeContainerId = active && (active === nodeId || desc.has(active)) ? null : active;
+  return ensureLayerTree({
+    ...p,
+    shapes: p.shapes.filter((s) => !shapeIds.has(s.id)),
+    borders: getBorders(p).filter((b) => !borderIds.has(b.id)),
+    layerTree: { ...tree, root, activeContainerId },
+  });
+}
+
+export function borderGroupClipVerts(project: ManualProject, node: ManualContainerNode): PolyVert[][] {
+  return directChildBorders(project, node)
+    .map(borderVertsOf)
+    .filter((v) => v.length >= 3);
+}
+
+export function selectionIsAllBorders(project: ManualProject, nodeIds: string[]): boolean {
+  if (nodeIds.length < 2) return false;
+  const tree = getLayerTree(project);
+  return nodeIds.every((id) => {
+    const f = findNode(tree, id);
+    return !!f && f.node.kind === "container" && !!f.node.borderId;
+  });
+}
+
+/** Cover the union bbox of a Border group's member borders with one rect, clipped by the group. */
+export function fillBorderGroup(
+  project: ManualProject,
+  containerId: string,
+  category: Category,
+): ManualProject {
+  const p = ensureLayerTree(project);
+  const loc = findNode(getLayerTree(p), containerId);
+  if (!loc || loc.node.kind !== "container" || !loc.node.borderGroup) return p;
+  const rings = borderGroupClipVerts(p, loc.node);
+  if (rings.length < 1) return p;
+  let x0 = Infinity,
+    y0 = Infinity,
+    x1 = -Infinity,
+    y1 = -Infinity;
+  for (const ring of rings) {
+    for (const pt of flattenPolyVerts(ring)) {
+      if (pt[0] < x0) x0 = pt[0];
+      if (pt[1] < y0) y0 = pt[1];
+      if (pt[0] > x1) x1 = pt[0];
+      if (pt[1] > y1) y1 = pt[1];
+    }
+  }
+  if (!Number.isFinite(x0) || x1 - x0 < 1 || y1 - y0 < 1) return p;
+  const points: Point[] = [
+    [x0, y0],
+    [x1, y0],
+    [x1, y1],
+    [x0, y1],
+  ];
+  const shape: ManualShape = {
+    id: newShapeId(),
+    kind: "rect",
+    points,
+    verts: points.map((pt) => ({ p: pt })),
+    category,
+    fill: defaultFill(category),
+  };
+  const leaf = makeLeaf(shape.id);
+  const root = insertNodeInto(p.layerTree!.root, containerId, 0, leaf);
+  return ensureLayerTree({
+    ...p,
+    shapes: [...p.shapes, shape],
+    layerTree: { ...p.layerTree!, root, activeContainerId: containerId },
+  });
+}
+
+/**
+ * Fill a Border group, or wrap 2+ selected Borders into a group then fill.
+ * Uses `category` (Draw as) for the covering rect.
+ */
+export function fillFromBorderSelection(
+  project: ManualProject,
+  selectedNodeIds: string[],
+  category: Category,
+): ManualProject {
+  const tree = getLayerTree(project);
+  if (selectedNodeIds.length === 1) {
+    const f = findNode(tree, selectedNodeIds[0]);
+    if (f && isBorderGroup(f.node)) return fillBorderGroup(project, f.node.id, category);
+  }
+  if (selectionIsAllBorders(project, selectedNodeIds)) {
+    const first = findNode(tree, selectedNodeIds[0]);
+    const parent = first?.parent;
+    if (
+      parent &&
+      isBorderGroup(parent) &&
+      selectedNodeIds.every((id) => parent.children.some((c) => c.id === id))
+    ) {
+      return fillBorderGroup(project, parent.id, category);
+    }
+    const grouped = groupNodes(project, selectedNodeIds);
+    const gid = grouped.layerTree?.activeContainerId;
+    if (gid) return fillBorderGroup(grouped, gid, category);
+  }
+  const activeId = tree.activeContainerId;
+  if (activeId) {
+    const active = findNode(tree, activeId);
+    if (active && isBorderGroup(active.node)) return fillBorderGroup(project, active.node.id, category);
+  }
+  return project;
 }
 
 export function getDrawOpacity(project: ManualProject | null | undefined): number {
@@ -1558,6 +1776,15 @@ export function emitManualSvg(
           }
         }
       }
+      if (n.borderGroup) {
+        const rings = directChildBorders(project, n)
+          .map((b) => borderVertsOf(b).map((v) => normVert(v, norm)))
+          .filter((v) => v.length >= 3);
+        if (rings.length >= 1) {
+          const paths = rings.map((bv) => `      <path d="${pathDFromVerts(bv)}"/>`).join("\n");
+          borderClipDefs.push(`    <clipPath id="border-group-clip-${esc(n.id)}">\n${paths}\n    </clipPath>`);
+        }
+      }
       collectBorderClips(n.children);
     }
   };
@@ -1624,6 +1851,7 @@ export function emitManualSvg(
     );
   };
   let borderCount = 0;
+  let bgroupCount = 0;
   const emitNodes = (nodes: ManualNode[], indent: string) => {
     for (const n of nodes) {
       if (n.kind === "leaf") {
@@ -1655,6 +1883,18 @@ export function emitManualSvg(
         } else {
           emitNodes(n.children, indent + "  ");
         }
+        o.push(`${indent}</g>`);
+        continue;
+      }
+      if (n.borderGroup) {
+        bgroupCount += 1;
+        const gid = `bgroup-${String(bgroupCount).padStart(2, "0")}`;
+        const nm = n.name ? ` data-name="${esc(n.name)}"` : "";
+        const rings = borderGroupClipVerts(project, n);
+        const clip =
+          rings.length >= 1 ? ` clip-path="url(#border-group-clip-${esc(n.id)})"` : "";
+        o.push(`${indent}<g id="${gid}" data-kind="border-group" data-node-id="${esc(n.id)}"${nm}${clip}>`);
+        emitNodes(n.children, indent + "  ");
         o.push(`${indent}</g>`);
         continue;
       }
@@ -1784,7 +2024,17 @@ export function parseManualSvg(svgText: string): ManualProject {
   const walk = (parent: Element): ManualNode[] => {
     const out: ManualNode[] = [];
     for (const el of Array.from(parent.children)) {
-      if (el.tagName === "g" && el.getAttribute("data-kind") === "border") {
+      if (el.tagName === "g" && el.getAttribute("data-kind") === "border-group") {
+        out.push({
+          id: el.getAttribute("data-node-id") || newNodeId("g"),
+          kind: "container",
+          name: el.getAttribute("data-name") ?? "",
+          locked: false,
+          visible: true,
+          children: walk(el),
+          borderGroup: true,
+        });
+      } else if (el.tagName === "g" && el.getAttribute("data-kind") === "border") {
         const outline = Array.from(el.children).find(
           (c) => c.tagName === "path" && c.getAttribute("data-kind") === "border",
         ) as SVGPathElement | undefined;

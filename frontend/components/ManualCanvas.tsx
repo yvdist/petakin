@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useRef, useState, MouseEvent } from "react";
-import type { Point } from "@/lib/types";
+import type { Category, Point } from "@/lib/types";
 import {
   bendEdge,
   bendHitRadius,
@@ -9,18 +9,24 @@ import {
   edgeHitRadius,
   ellipseVertsFromBox,
   exportToSource,
+  flattenPolyVerts,
   flattenPolyVertsOpen,
   getDrawOpacity,
   getLayerTree,
   getLineDefaults,
   getBorders,
   borderById,
-  borderIdForNode,
   borderVertsOf,
   containerForBorder,
+  enclosingBorderGroup,
   isBorderId,
+  isBorderGroup,
+  collectBorderGroupNodes,
+  borderGroupClipVerts,
+  directChildBorders,
   isNodeVisible,
   isNodeLocked,
+  findNode,
   getShellStroke,
   getStroke,
   insertVertOnEdge,
@@ -45,6 +51,7 @@ import {
   type PolyVert,
   type ShapeKind,
 } from "@/lib/manual";
+import ContextMenu, { colorSwatchItems, type MenuItem } from "@/components/ContextMenu";
 import { AEON_CONFIG } from "@/lib/presets";
 
 const BRAND = "#0D9488";
@@ -75,6 +82,14 @@ interface Props {
   onRequestTool?: (tool: Tool) => void;
   onUpdateBadgeLayout?: (layout: ManualBadgeLayout) => void;
   onDraftActive?: (active: boolean) => void;
+  onDuplicateShape?: (id: string) => void;
+  onDeleteNode?: (id: string) => void;
+  onRecolorShape?: (id: string, category: Category) => void;
+  onReorder?: (id: string, dir: "front" | "back") => void;
+  onRenameShape?: (id: string) => void;
+  onFillBorderGroup?: (id: string, category: Category) => void;
+  onSelectBorderGroupMembers?: (id: string) => void;
+  onUngroup?: (id: string) => void;
 }
 
 type View = { scale: number; tx: number; ty: number };
@@ -146,6 +161,26 @@ function rotateVerts(verts: PolyVert[], cx: number, cy: number, ang: number): Po
 const ROTATE_CURSOR =
   "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><path d='M21 12a9 9 0 1 1-2.64-6.36'/><path d='M21 3v5h-5'/></svg>\") 12 12, crosshair";
 
+function pointInPoly(p: Point, pts: Point[]): boolean {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const xi = pts[i][0];
+    const yi = pts[i][1];
+    const xj = pts[j][0];
+    const yj = pts[j][1];
+    if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi + Number.EPSILON) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+type CanvasMenu = {
+  x: number;
+  y: number;
+  items: MenuItem[];
+};
+
 export default function ManualCanvas({
   project,
   tool,
@@ -164,6 +199,14 @@ export default function ManualCanvas({
   onRequestTool,
   onUpdateBadgeLayout,
   onDraftActive,
+  onDuplicateShape,
+  onDeleteNode,
+  onRecolorShape,
+  onReorder,
+  onRenameShape,
+  onFillBorderGroup,
+  onSelectBorderGroupMembers,
+  onUngroup,
 }: Props) {
   const { bg, shapes } = project;
   const shellV = shellVertsOf(project);
@@ -188,6 +231,7 @@ export default function ManualCanvas({
     viewRef.current = view;
   }, [view]);
   const [hovered, setHovered] = useState<string | null>(null);
+  const [ctxMenu, setCtxMenu] = useState<CanvasMenu | null>(null);
 
   const [rectDraft, setRectDraft] = useState<{ a: Point; b: Point } | null>(null);
   const [poly, setPoly] = useState<PolyDraft | null>(null);
@@ -665,13 +709,34 @@ export default function ManualCanvas({
     }
   };
 
+  const addPointOnEdge = (id: string, edgeIndex: number, q: Point) => {
+    const src =
+      id === SHELL_ID
+        ? shellV
+        : isBorderId(project, id)
+          ? (() => {
+              const b = borderById(project, id);
+              return b ? borderVertsOf(b) : null;
+            })()
+          : (() => {
+              const s = shapes.find((x) => x.id === id);
+              return s ? shapeVerts(s) : null;
+            })();
+    if (!src) return;
+    const next = insertVertOnEdge(src, edgeIndex, q);
+    commitVerts(id, next);
+    onSelect(id);
+    onSelectVert(edgeIndex + 1);
+  };
+
   const onContextMenu = (e: MouseEvent) => {
     e.preventDefault();
-    if (tool !== "select" || spaceHeld.current) return;
+    e.stopPropagation();
+    if (spaceHeld.current || poly) return;
+
     const c = toContent(e.clientX, e.clientY);
     const maxDist = edgeHitRadius(view.scale);
 
-    // prefer selected shape/shell, then any shape
     const candidates: { id: string; verts: PolyVert[] }[] = [];
     if (selectedId === SHELL_ID && shellV) candidates.push({ id: SHELL_ID, verts: shellV });
     else if (selectedId && isBorderId(project, selectedId)) {
@@ -689,24 +754,122 @@ export default function ManualCanvas({
       if (s.id !== selectedId) candidates.push({ id: s.id, verts: shapeVerts(s) });
     }
 
-    let hit: { id: string; edgeIndex: number; q: Point; dist: number } | null = null;
+    let edgeHit: { id: string; edgeIndex: number; q: Point; dist: number } | null = null;
     for (const cand of candidates) {
       const edge = nearestEdge(c, cand.verts, maxDist, ringClosed(cand.id));
-      if (edge && (!hit || edge.dist < hit.dist)) {
-        hit = { id: cand.id, edgeIndex: edge.index, q: edge.q, dist: edge.dist };
+      if (edge && (!edgeHit || edge.dist < edgeHit.dist)) {
+        edgeHit = { id: cand.id, edgeIndex: edge.index, q: edge.q, dist: edge.dist };
       }
     }
-    if (!hit) return;
-    const src =
-      hit.id === SHELL_ID
-        ? shellV!
-        : isBorderId(project, hit.id)
-          ? borderVertsOf(borderById(project, hit.id)!)
-          : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
-    const next = insertVertOnEdge(src, hit.edgeIndex, hit.q);
-    commitVerts(hit.id, next);
-    onSelect(hit.id);
-    onSelectVert(hit.edgeIndex + 1);
+
+    let interior: { kind: "shape" | "border"; id: string } | null = null;
+    for (let i = paintOrder.length - 1; i >= 0; i--) {
+      const s = paintOrder[i];
+      if (isLineShape(s)) continue;
+      const pts = flattenPolyVerts(shapeVerts(s));
+      if (pts.length >= 3 && pointInPoly(c, pts)) {
+        interior = { kind: "shape", id: s.id };
+        break;
+      }
+    }
+    if (!interior) {
+      const borders = getBorders(project);
+      for (let i = borders.length - 1; i >= 0; i--) {
+        const pts = flattenPolyVerts(borderVertsOf(borders[i]));
+        if (pts.length >= 3 && pointInPoly(c, pts)) {
+          interior = { kind: "border", id: borders[i].id };
+          break;
+        }
+      }
+    }
+
+    const targetId = edgeHit?.id ?? (interior ? interior.id : null);
+    if (targetId) onSelect(targetId);
+
+    const items: MenuItem[] = [];
+    const addPointItem = (id: string): MenuItem | null =>
+      edgeHit && edgeHit.id === id
+        ? {
+            type: "item",
+            label: "Add point here",
+            onClick: () => addPointOnEdge(id, edgeHit!.edgeIndex, edgeHit!.q),
+          }
+        : null;
+
+    if (targetId === SHELL_ID) {
+      const ap = addPointItem(SHELL_ID);
+      if (ap) items.push(ap);
+      items.push({ type: "item", label: "Delete shell", danger: true, onClick: () => onDeleteNode?.(SHELL_ID) });
+    } else if (targetId && isBorderId(project, targetId)) {
+      const ap = addPointItem(targetId);
+      if (ap) items.push(ap);
+      const bNode = containerForBorder(project, targetId);
+      const group = bNode ? enclosingBorderGroup(project, bNode.id) : null;
+      if (group) {
+        items.push({
+          type: "item",
+          label: "Fill",
+          submenu: colorSwatchItems((cat) => onFillBorderGroup?.(group.id, cat)),
+        });
+        items.push({
+          type: "item",
+          label: "Select all borders in group",
+          onClick: () => onSelectBorderGroupMembers?.(group.id),
+        });
+        items.push({ type: "separator" });
+        items.push({ type: "item", label: "Ungroup", onClick: () => onUngroup?.(group.id) });
+        items.push({ type: "item", label: "Rename group", onClick: () => onRenameShape?.(group.id) });
+        items.push({
+          type: "item",
+          label: "Delete group",
+          danger: true,
+          onClick: () => onDeleteNode?.(group.id),
+        });
+        items.push({ type: "separator" });
+      }
+      items.push({
+        type: "item",
+        label: "Delete border",
+        danger: true,
+        onClick: () => onDeleteNode?.(targetId),
+      });
+    } else if (targetId) {
+      const ap = addPointItem(targetId);
+      if (ap) items.push(ap);
+      items.push({ type: "item", label: "Duplicate", onClick: () => onDuplicateShape?.(targetId) });
+      items.push({ type: "item", label: "Bring to front", onClick: () => onReorder?.(targetId, "front") });
+      items.push({ type: "item", label: "Send to back", onClick: () => onReorder?.(targetId, "back") });
+      items.push({
+        type: "item",
+        label: "Recolor",
+        submenu: colorSwatchItems((cat) => onRecolorShape?.(targetId, cat)),
+      });
+      items.push({ type: "item", label: "Rename", onClick: () => onRenameShape?.(targetId) });
+      items.push({ type: "separator" });
+      items.push({
+        type: "item",
+        label: "Delete",
+        danger: true,
+        onClick: () => onDeleteNode?.(targetId),
+      });
+    } else {
+      items.push({ type: "item", label: "Fit view", onClick: resetView });
+      items.push({
+        type: "item",
+        label: "Deselect all",
+        onClick: () => {
+          onSelect(null);
+          onSelectVert(null);
+        },
+      });
+      items.push({ type: "separator" });
+      items.push({ type: "item", label: "Select", onClick: () => onRequestTool?.("select") });
+      items.push({ type: "item", label: "Draw shape", onClick: () => onRequestTool?.("rect") });
+      items.push({ type: "item", label: "Draw border", onClick: () => onRequestTool?.("border") });
+      items.push({ type: "item", label: "Draw line", onClick: () => onRequestTool?.("line") });
+    }
+
+    setCtxMenu({ x: e.clientX, y: e.clientY, items });
   };
 
   const closePoly = useCallback(() => {
@@ -978,12 +1141,17 @@ export default function ManualCanvas({
       : [];
 
   const layerTree = getLayerTree(project);
-  const activeBorderContainerId =
-    tool === "border" && layerTree.activeContainerId && borderIdForNode(project, layerTree.activeContainerId)
-      ? layerTree.activeContainerId
-      : null;
+  const activeClipContainerId = (() => {
+    const id = layerTree.activeContainerId;
+    if (!id) return null;
+    const f = findNode(layerTree, id);
+    if (!f || f.node.kind !== "container") return null;
+    if (isBorderGroup(f.node)) return id;
+    if (tool === "border" && f.node.borderId) return id;
+    return null;
+  })();
   const dimForAncestors = (ancestors: string[]) =>
-    !!activeBorderContainerId && !ancestors.includes(activeBorderContainerId);
+    !!activeClipContainerId && !ancestors.includes(activeClipContainerId);
 
   const paintFills = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
     nodes.map((n) => {
@@ -1034,6 +1202,13 @@ export default function ManualCanvas({
           </g>
         );
       }
+      if (isBorderGroup(n) && borderGroupClipVerts(project, n).length >= 1) {
+        return (
+          <g key={`f-${n.id}`} clipPath={`url(#mc-bgroup-${n.id})`}>
+            {kids}
+          </g>
+        );
+      }
       return <g key={`f-${n.id}`}>{kids}</g>;
     });
 
@@ -1068,6 +1243,13 @@ export default function ManualCanvas({
       if (border?.clip) {
         return (
           <g key={`o-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      if (isBorderGroup(n) && borderGroupClipVerts(project, n).length >= 1) {
+        return (
+          <g key={`o-${n.id}`} clipPath={`url(#mc-bgroup-${n.id})`}>
             {kids}
           </g>
         );
@@ -1216,6 +1398,19 @@ export default function ManualCanvas({
             return (
               <clipPath key={b.id} id={`mc-border-${b.id}`}>
                 <path d={pathDFromVerts(verts)} />
+              </clipPath>
+            );
+          })}
+          {collectBorderGroupNodes(layerTree.root).map((n) => {
+            const rings = directChildBorders(project, n)
+              .map((b) => ({ id: b.id, verts: liveVertsFor(b.id, borderVertsOf(b)) }))
+              .filter((r) => r.verts.length >= 3);
+            if (!rings.length) return null;
+            return (
+              <clipPath key={n.id} id={`mc-bgroup-${n.id}`}>
+                {rings.map((r) => (
+                  <path key={r.id} d={pathDFromVerts(r.verts)} />
+                ))}
               </clipPath>
             );
           })}
@@ -1530,6 +1725,10 @@ export default function ManualCanvas({
           {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
           pan · ⌘Z undo · Enter close · Esc cancel
         </div>
+      )}
+
+      {ctxMenu && (
+        <ContextMenu x={ctxMenu.x} y={ctxMenu.y} items={ctxMenu.items} onClose={() => setCtxMenu(null)} />
       )}
     </div>
   );
