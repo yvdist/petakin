@@ -73,7 +73,10 @@ function shapeLabel(s: ManualShape): string {
 }
 
 function nodeLabel(node: ManualNode, shapeMap: Map<string, ManualShape>): string {
-  if (node.kind === "container") return node.name || "Group";
+  if (node.kind === "container") {
+    if (node.borderId) return node.name?.trim() || "Border";
+    return node.name || "Group";
+  }
   if (node.name?.trim()) return node.name.trim();
   const s = shapeMap.get(node.shapeId);
   return s ? shapeLabel(s) : "shape";
@@ -271,6 +274,13 @@ export default function LayersPanel({
                 className="ml-0.5 h-2.5 w-2.5 shrink-0 rounded-sm ring-1 ring-black/10"
                 style={{ background: leafShape.fill }}
               />
+            ) : node.kind === "container" && node.borderId ? (
+              <span className="ml-0.5 shrink-0 text-neutral-400" title="Border">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <rect x="3" y="3" width="18" height="18" rx="1" />
+                  <rect x="7" y="7" width="10" height="10" rx="1" strokeDasharray="3 2" />
+                </svg>
+              </span>
             ) : (
               <span className="ml-0.5 shrink-0 text-neutral-400" title="Group">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>

@@ -27,6 +27,7 @@ import {
   DEFAULT_STROKE,
   DEFAULT_SHELL_STROKE,
   DEFAULT_LINE_STROKE,
+  DEFAULT_BORDER_STROKE,
   DEFAULT_EXPORT_TARGET_H,
   DEFAULT_EXPORT_TARGET_W,
   DEFAULT_PNG_SCALE,
@@ -39,6 +40,7 @@ import {
   activeProject,
   computeExportLayout,
   createContainer,
+  createBorder,
   defaultBadgeLayoutForCanvas,
   defaultFill,
   deleteContainers,
@@ -53,6 +55,16 @@ import {
   getExportTargetW,
   getLayerTree,
   getLineDefaults,
+  getBorderDefaults,
+  getBorders,
+  borderById,
+  borderIdForNode,
+  borderVertsOf,
+  isBorderId,
+  containerForBorder,
+  updateBorderVerts as applyBorderVerts,
+  patchBorder,
+  deleteBorder as removeBorder,
   getPngScale,
   getShellStroke,
   getStroke,
@@ -140,6 +152,13 @@ function ToolIcon({ name }: { name: Tool }) {
         <svg {...common} aria-hidden>
           <path d="M4 18l5-8 4 5 7-11" />
           <path d="M4 18l5-8" strokeDasharray="2 2" />
+        </svg>
+      );
+    case "border":
+      return (
+        <svg {...common} aria-hidden>
+          <rect x="4" y="4" width="16" height="16" rx="1" />
+          <rect x="7" y="7" width="10" height="10" rx="1" strokeDasharray="3 2" />
         </svg>
       );
     case "badge":
@@ -247,6 +266,7 @@ export default function ManualPage() {
     setSelectedId((id) => {
       if (!id) return id;
       if (id === SHELL_ID) return p.shell && p.shell.length >= 3 ? SHELL_ID : null;
+      if (isBorderId(p, id)) return id;
       return p.shapes.some((s) => s.id === id) ? id : null;
     });
     setSelectedNodeIds((ids) => ids.filter((nid) => !!findNode(getLayerTree(p), nid)));
@@ -492,8 +512,13 @@ export default function ManualPage() {
       setSelectedId(id);
       setSelectedVertIndex(null);
       if (id && id !== SHELL_ID && project) {
-        const nid = nodeIdForShape(project, id);
-        setSelectedNodeIds(nid ? [nid] : []);
+        if (isBorderId(project, id)) {
+          const node = containerForBorder(project, id);
+          setSelectedNodeIds(node ? [node.id] : []);
+        } else {
+          const nid = nodeIdForShape(project, id);
+          setSelectedNodeIds(nid ? [nid] : []);
+        }
       } else {
         setSelectedNodeIds([]);
       }
@@ -506,10 +531,15 @@ export default function ManualPage() {
     const verts =
       selectedId === SHELL_ID
         ? shellVertsOf(project)
-        : (() => {
-            const s = project.shapes.find((x) => x.id === selectedId);
-            return s ? shapeVerts(s) : null;
-          })();
+        : isBorderId(project, selectedId)
+          ? (() => {
+              const b = borderById(project, selectedId);
+              return b ? borderVertsOf(b) : null;
+            })()
+          : (() => {
+              const s = project.shapes.find((x) => x.id === selectedId);
+              return s ? shapeVerts(s) : null;
+            })();
     if (!verts) return;
     const line = selectedId !== SHELL_ID && project.shapes.find((x) => x.id === selectedId)?.kind === "line";
     const next = removeVert(verts, selectedVertIndex, line ? 2 : 3);
@@ -520,6 +550,8 @@ export default function ManualPage() {
     if (selectedId === SHELL_ID) {
       const points = syncShapeFromVerts(next).points;
       updateActive((p) => ({ ...p, shell: points, shellVerts: next }), { label: "Delete point" });
+    } else if (isBorderId(project, selectedId)) {
+      updateActive((p) => applyBorderVerts(p, selectedId, next), { label: "Delete point" });
     } else {
       updateShapeVerts(selectedId, next);
     }
@@ -535,6 +567,14 @@ export default function ManualPage() {
       setSelectedVertIndex(null);
       return;
     }
+    if (project && isBorderId(project, selectedId)) {
+      if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+      updateActive((p) => removeBorder(p, selectedId), { label: "Delete border" });
+      setSelectedId(null);
+      setSelectedNodeIds([]);
+      setSelectedVertIndex(null);
+      return;
+    }
     if (!confirm("Delete this shape?")) return;
     updateActive(
       (p) =>
@@ -544,13 +584,44 @@ export default function ManualPage() {
     setSelectedId(null);
     setSelectedNodeIds([]);
     setSelectedVertIndex(null);
-  }, [selectedId, updateActive]);
+  }, [project, selectedId, updateActive]);
 
   const setShell = useCallback(
     (verts: PolyVert[]) => {
       const points = syncShapeFromVerts(verts).points;
       updateActive((p) => ({ ...p, shell: points, shellVerts: verts }), { label: "Set shell" });
       setTool("select");
+    },
+    [updateActive],
+  );
+
+  const addBorder = useCallback(
+    (verts: PolyVert[]) => {
+      let newId: string | null = null;
+      let nodeId: string | null = null;
+      updateActive(
+        (p) => {
+          const next = createBorder(p, verts, getLayerTree(p).activeContainerId);
+          const prev = new Set(getBorders(p).map((b) => b.id));
+          newId = getBorders(next).find((b) => !prev.has(b.id))?.id ?? null;
+          if (newId) nodeId = containerForBorder(next, newId)?.id ?? null;
+          return next;
+        },
+        { label: "Add border" },
+      );
+      if (newId) {
+        setSelectedId(newId);
+        setSelectedVertIndex(null);
+        setSelectedNodeIds(nodeId ? [nodeId] : []);
+      }
+      setTool("select");
+    },
+    [updateActive],
+  );
+
+  const updateBorderGeometry = useCallback(
+    (id: string, verts: PolyVert[]) => {
+      updateActive((p) => applyBorderVerts(p, id, verts), { label: "Edit border" });
     },
     [updateActive],
   );
@@ -565,7 +636,7 @@ export default function ManualPage() {
   }, [selectedId, updateActive]);
 
   const duplicateSelected = useCallback(() => {
-    if (!selectedId || selectedId === SHELL_ID) return;
+    if (!selectedId || selectedId === SHELL_ID || (project && isBorderId(project, selectedId))) return;
     updateActive((p) => {
       const src = p.shapes.find((s) => s.id === selectedId);
       if (!src) return p;
@@ -583,7 +654,7 @@ export default function ManualPage() {
       setSelectedVertIndex(null);
       return insertLeafForShape({ ...p, shapes: [...p.shapes, copy] }, copy.id);
     }, { label: "Duplicate" });
-  }, [selectedId, updateActive]);
+  }, [project, selectedId, updateActive]);
 
   const setOpacity = (v: number) =>
     updateActive((p) => ({ ...p, bg: { ...p.bg, opacity: v } }), {
@@ -628,6 +699,12 @@ export default function ManualPage() {
       }),
       { label: "Edit line", history: "coalesce" },
     );
+  const borderDefaults = getBorderDefaults(project);
+  const setBorderDefault = (patch: Partial<ReturnType<typeof getBorderDefaults>>) =>
+    updateActive(
+      (p) => ({ ...p, borderDefaults: { ...getBorderDefaults(p), ...patch } }),
+      { label: "Border style", history: "coalesce" },
+    );
 
   // ---- layers (recursive node tree) ----
   const activeContainerId = useMemo(
@@ -643,9 +720,17 @@ export default function ManualPage() {
     (id: string, e: React.MouseEvent) => {
       if (!project) return;
       const syncCanvas = (nodeId: string | null) => {
-        const sid = nodeId ? shapeIdForNode(project, nodeId) : null;
-        setSelectedId(sid);
         setSelectedVertIndex(null);
+        if (!nodeId) {
+          setSelectedId(null);
+          return;
+        }
+        const bid = borderIdForNode(project, nodeId);
+        if (bid) {
+          setSelectedId(bid);
+          return;
+        }
+        setSelectedId(shapeIdForNode(project, nodeId));
       };
       if (e.metaKey || e.ctrlKey) {
         setSelectedNodeIds((prev) =>
@@ -995,6 +1080,7 @@ export default function ManualPage() {
       else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
       else if (e.key === "l" || e.key === "L") setTool("line");
+      else if (e.key === "b" || e.key === "B") setTool("border");
       else if (e.key === "o" || e.key === "O" || e.key === "s" || e.key === "S") setTool("shell");
       else if (e.key === "f" || e.key === "F") setTool("badge");
       else if (e.key === "Delete" || e.key === "Backspace") {
@@ -1031,8 +1117,33 @@ export default function ManualPage() {
     [selectedId, project],
   );
   const shellSelected = selectedId === SHELL_ID;
+  const selectedBorder = project && selectedId ? borderById(project, selectedId) : null;
   const hasImage = !!project?.bg.dataUrl;
   const shellPts = project?.shell && project.shell.length >= 3 ? project.shell : null;
+  const borderList = project ? getBorders(project) : [];
+  const borderUiColor = selectedBorder ? selectedBorder.stroke.color : borderDefaults.color;
+  const borderUiWidth = selectedBorder ? selectedBorder.stroke.width : borderDefaults.width;
+  const borderUiDash = selectedBorder ? (selectedBorder.dash ?? "solid") : borderDefaults.dash;
+  const commitBorderAppearance = (
+    color: string,
+    width: number,
+    dash: "solid" | "dash",
+    clip?: boolean,
+  ) => {
+    if (selectedBorder) {
+      updateActive(
+        (p) =>
+          patchBorder(p, selectedBorder.id, {
+            stroke: { color, width },
+            dash,
+            ...(clip !== undefined ? { clip } : {}),
+          }),
+        { label: "Edit border", history: "coalesce" },
+      );
+    } else {
+      setBorderDefault({ color, width, dash });
+    }
+  };
 
   const TOOLS: { key: Tool; label: string; hint: string }[] = [
     { key: "select", label: "Select", hint: "V" },
@@ -1041,6 +1152,7 @@ export default function ManualPage() {
     { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
     { key: "line", label: "Line", hint: "L" },
+    { key: "border", label: "Border", hint: "B" },
     { key: "badge", label: "Badge", hint: "F" },
   ];
 
@@ -1152,7 +1264,7 @@ export default function ManualPage() {
                 </button>
               ))}
             </div>
-            {tool !== "line" && (
+            {tool !== "line" && tool !== "border" && (
               <>
                 <div className="mb-2 text-xs text-neutral-600">Draw as</div>
                 <div className="mb-3 flex flex-wrap gap-1">
@@ -1382,6 +1494,123 @@ export default function ManualPage() {
               </Section>
             );
           })()}
+
+          {(tool === "border" || selectedBorder) && (
+              <Section title="Border">
+                <p className="mb-2 text-xs text-neutral-600">
+                  {selectedBorder
+                    ? "Clip region of the selected border. New shapes go inside the active border."
+                    : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points)."}
+                </p>
+                <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                  Color
+                  <input
+                    type="color"
+                    value={borderUiColor}
+                    onChange={(e) =>
+                      commitBorderAppearance(e.target.value, borderUiWidth, borderUiDash)
+                    }
+                    className="h-6 w-10 rounded border border-neutral-300"
+                  />
+                </label>
+                <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                  Width
+                  <input
+                    type="range"
+                    min={1}
+                    max={24}
+                    step={1}
+                    value={borderUiWidth}
+                    onChange={(e) =>
+                      commitBorderAppearance(borderUiColor, Number(e.target.value), borderUiDash)
+                    }
+                    className="w-24 accent-brand"
+                  />
+                  <span className="w-6 font-mono">{borderUiWidth}</span>
+                  px
+                </label>
+                <div className="mb-2 flex gap-1">
+                  {(["solid", "dash"] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => commitBorderAppearance(borderUiColor, borderUiWidth, d)}
+                      className={`flex-1 rounded px-2 py-1 text-xs capitalize ${
+                        borderUiDash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+                {selectedBorder && (
+                  <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                    <input
+                      type="checkbox"
+                      checked={selectedBorder.clip}
+                      onChange={(e) =>
+                        commitBorderAppearance(
+                          borderUiColor,
+                          borderUiWidth,
+                          borderUiDash,
+                          e.target.checked,
+                        )
+                      }
+                    />
+                    Clip contents
+                  </label>
+                )}
+                {borderList.length > 0 && (
+                  <div className="mb-2">
+                    <div className="mb-1 text-[11px] text-neutral-500">Borders</div>
+                    <div className="flex flex-col gap-0.5">
+                      {borderList.map((b, i) => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => {
+                            selectId(b.id);
+                            const node = project ? containerForBorder(project, b.id) : null;
+                            if (node) {
+                              updateActive((p) => setActiveContainer(p, node.id), { history: "skip" });
+                            }
+                          }}
+                          className={`rounded px-2 py-1 text-left text-xs ${
+                            selectedId === b.id ? "bg-brand text-white" : "bg-neutral-100 text-neutral-700"
+                          }`}
+                        >
+                          {b.name?.trim() || `Border ${i + 1}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedBorder && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-red-600 hover:underline"
+                    onClick={deleteSelected}
+                  >
+                    Delete border
+                  </button>
+                )}
+                {!selectedBorder && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-neutral-500 hover:underline"
+                    onClick={() =>
+                      commitBorderAppearance(
+                        DEFAULT_BORDER_STROKE.color,
+                        DEFAULT_BORDER_STROKE.width,
+                        "solid",
+                      )
+                    }
+                  >
+                    Reset to dark / 2px / solid
+                  </button>
+                )}
+              </Section>
+          )}
 
           {selShape && (
             <Section title="Shape" right={<span className="text-xs text-neutral-400">{selShape.kind}</span>}>
@@ -1712,6 +1941,8 @@ export default function ManualPage() {
                 "Click = corner · drag = curve · Enter finish (2+ pts) · exact cursor · Space = pan"}
               {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
+              {tool === "border" &&
+                "Trace clip region · click/drag curves · Enter finish (3+ pts) · exact cursor · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&
                 "Alt-drag from selected point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}
@@ -1719,7 +1950,7 @@ export default function ManualPage() {
           </div>
 
           <div ref={editorHostRef} className="relative min-h-0 flex-1 overflow-hidden">
-            {project && (hasImage || project.shapes.length > 0 || project.shell) ? (
+            {project && (hasImage || project.shapes.length > 0 || project.shell || getBorders(project).length > 0) ? (
               <div className="absolute inset-0">
                 <ManualCanvas
                   key={workspace?.activeTabId ?? "tab"}
@@ -1735,6 +1966,8 @@ export default function ManualPage() {
                   onAddShape={addShape}
                   onUpdateShapeVerts={updateShapeVerts}
                   onSetShell={setShell}
+                  onAddBorder={addBorder}
+                  onUpdateBorderVerts={updateBorderGeometry}
                   onRequestTool={setTool}
                   onUpdateBadgeLayout={updateBadgeLayout}
                   onDraftActive={(active) => {

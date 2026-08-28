@@ -11,7 +11,16 @@ import {
   exportToSource,
   flattenPolyVertsOpen,
   getDrawOpacity,
+  getLayerTree,
   getLineDefaults,
+  getBorders,
+  borderById,
+  borderIdForNode,
+  borderVertsOf,
+  containerForBorder,
+  isBorderId,
+  isNodeVisible,
+  isNodeLocked,
   getShellStroke,
   getStroke,
   insertVertOnEdge,
@@ -30,6 +39,7 @@ import {
   dashArray,
   SHELL_ID,
   type ManualBadgeLayout,
+  type ManualNode,
   type ManualProject,
   type ManualShape,
   type PolyVert,
@@ -45,7 +55,7 @@ const ZOOM_MIN = 0.05;
 const ZOOM_MAX = 40;
 const ZOOM_STEP = 1.25;
 
-export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "line" | "badge";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "line" | "border" | "badge";
 
 interface Props {
   project: ManualProject;
@@ -60,6 +70,8 @@ interface Props {
   onAddShape: (shape: ManualShape) => void;
   onUpdateShapeVerts: (id: string, verts: PolyVert[]) => void;
   onSetShell: (verts: PolyVert[]) => void;
+  onAddBorder?: (verts: PolyVert[]) => void;
+  onUpdateBorderVerts?: (id: string, verts: PolyVert[]) => void;
   onRequestTool?: (tool: Tool) => void;
   onUpdateBadgeLayout?: (layout: ManualBadgeLayout) => void;
   onDraftActive?: (active: boolean) => void;
@@ -68,7 +80,7 @@ interface Props {
 type View = { scale: number; tx: number; ty: number };
 
 type PolyDraft = {
-  kind: "poly" | "shell" | "line";
+  kind: "poly" | "shell" | "line" | "border";
   verts: PolyVert[];
   cur: Point;
 };
@@ -147,6 +159,8 @@ export default function ManualCanvas({
   onAddShape,
   onUpdateShapeVerts,
   onSetShell,
+  onAddBorder,
+  onUpdateBorderVerts,
   onRequestTool,
   onUpdateBadgeLayout,
   onDraftActive,
@@ -202,7 +216,7 @@ export default function ManualCanvas({
   useEffect(() => {
     setRectDraft(null);
     setPlacing(null);
-    if ((tool === "poly" || tool === "shell" || tool === "line") && polyRef.current) {
+    if ((tool === "poly" || tool === "shell" || tool === "line" || tool === "border") && polyRef.current) {
       setPoly((p) => (p ? { ...p, kind: tool } : p));
     }
   }, [tool]);
@@ -259,6 +273,12 @@ export default function ManualCanvas({
           if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
         }
       }
+      for (const b of getBorders(project)) {
+        if (b.id === excludeId) continue;
+        for (const v of borderVertsOf(b)) {
+          if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
+        }
+      }
       for (const s of shapes) {
         if (s.id === excludeId) continue;
         for (const v of shapeVerts(s)) {
@@ -268,7 +288,7 @@ export default function ManualCanvas({
       const g = gridSize > 0 ? gridSize : 1;
       return [Math.round(p[0] / g) * g, Math.round(p[1] / g) * g];
     },
-    [snap, shapes, shellV, view.scale, gridSize],
+    [snap, shapes, shellV, view.scale, gridSize, project],
   );
 
   function constrain(prev: Point, cur: Point): Point {
@@ -343,10 +363,11 @@ export default function ManualCanvas({
     moved.current = false;
   };
 
-  const drawingPolyLike = tool === "poly" || tool === "shell" || tool === "line";
+  const drawingPolyLike = tool === "poly" || tool === "shell" || tool === "line" || tool === "border";
   const draftPaused = !!poly && !drawingPolyLike;
   const ringClosed = (id: string) => {
     if (id === SHELL_ID) return true;
+    if (isBorderId(project, id)) return true;
     const s = shapes.find((x) => x.id === id);
     return !s || !isLineShape(s);
   };
@@ -354,15 +375,24 @@ export default function ManualCanvas({
   const commitVerts = useCallback(
     (id: string, verts: PolyVert[]) => {
       if (id === SHELL_ID) onSetShell(verts);
+      else if (isBorderId(project, id)) onUpdateBorderVerts?.(id, verts);
       else onUpdateShapeVerts(id, verts);
     },
-    [onSetShell, onUpdateShapeVerts],
+    [onSetShell, onUpdateBorderVerts, onUpdateShapeVerts, project],
   );
 
   const commitPolyPlace = useCallback(
     (anchor: Point, handleOut: Point | undefined, clientDist: number) => {
       const kind =
-        tool === "shell" ? "shell" : tool === "line" ? "line" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
+        tool === "shell"
+          ? "shell"
+          : tool === "line"
+            ? "line"
+            : tool === "border"
+              ? "border"
+              : tool === "poly"
+                ? "poly"
+                : polyRef.current?.kind ?? "poly";
       const vert: PolyVert =
         clientDist > DRAG_THRESH_PX && handleOut ? { p: anchor, handleOut } : { p: anchor };
       setPoly((prev) => {
@@ -413,11 +443,18 @@ export default function ManualCanvas({
         return true;
       };
       if (selectedId === SHELL_ID && shellV && tryBend(SHELL_ID, shellV)) return;
+      if (selectedId && isBorderId(project, selectedId)) {
+        const b = borderById(project, selectedId);
+        if (b && tryBend(b.id, borderVertsOf(b))) return;
+      }
       if (selectedId && selectedId !== SHELL_ID) {
         const s = shapes.find((x) => x.id === selectedId);
         if (s && tryBend(s.id, shapeVerts(s))) return;
       }
       if (shellV && tryBend(SHELL_ID, shellV)) return;
+      for (const b of getBorders(project)) {
+        if (tryBend(b.id, borderVertsOf(b))) return;
+      }
       for (const s of shapes) {
         if (tryBend(s.id, shapeVerts(s))) return;
       }
@@ -619,11 +656,17 @@ export default function ManualCanvas({
     // prefer selected shape/shell, then any shape
     const candidates: { id: string; verts: PolyVert[] }[] = [];
     if (selectedId === SHELL_ID && shellV) candidates.push({ id: SHELL_ID, verts: shellV });
-    else if (selectedId) {
+    else if (selectedId && isBorderId(project, selectedId)) {
+      const b = borderById(project, selectedId);
+      if (b) candidates.push({ id: b.id, verts: borderVertsOf(b) });
+    } else if (selectedId) {
       const s = shapes.find((x) => x.id === selectedId);
       if (s) candidates.push({ id: s.id, verts: shapeVerts(s) });
     }
     if (shellV && selectedId !== SHELL_ID) candidates.push({ id: SHELL_ID, verts: shellV });
+    for (const b of getBorders(project)) {
+      if (b.id !== selectedId) candidates.push({ id: b.id, verts: borderVertsOf(b) });
+    }
     for (const s of shapes) {
       if (s.id !== selectedId) candidates.push({ id: s.id, verts: shapeVerts(s) });
     }
@@ -639,7 +682,9 @@ export default function ManualCanvas({
     const src =
       hit.id === SHELL_ID
         ? shellV!
-        : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
+        : isBorderId(project, hit.id)
+          ? borderVertsOf(borderById(project, hit.id)!)
+          : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
     const next = insertVertOnEdge(src, hit.edgeIndex, hit.q);
     commitVerts(hit.id, next);
     onSelect(hit.id);
@@ -658,6 +703,8 @@ export default function ManualCanvas({
           onSetShell(synced.verts);
           onSelect(SHELL_ID);
         }
+      } else if (prev.kind === "border") {
+        if (synced.points.length >= 3) onAddBorder?.(synced.verts);
       } else if (prev.kind === "line") {
         if (synced.points.length >= 2) {
           onAddShape(makeShape("line", synced.points, synced.verts));
@@ -666,7 +713,7 @@ export default function ManualCanvas({
         onAddShape(makeShape("poly", synced.points, synced.verts));
       }
     }
-  }, [onAddShape, makeShape, onSetShell, onSelect]);
+  }, [onAddShape, makeShape, onSetShell, onSelect, onAddBorder]);
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
@@ -792,8 +839,12 @@ export default function ManualCanvas({
 
     onSelect(id);
     onSelectVert(null);
-    // Locked shapes: select only, no drag-move
-    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
+    if (id !== SHELL_ID) {
+      if (isBorderId(project, id)) {
+        const node = containerForBorder(project, id);
+        if (node && isNodeLocked(project, node.id)) return;
+      } else if (isShapeLocked(project, id)) return;
+    }
     drag.current = {
       mode: "move",
       startClient: { x: e.clientX, y: e.clientY },
@@ -807,7 +858,12 @@ export default function ManualCanvas({
   const beginRotate = (e: MouseEvent, verts: PolyVert[], id: string) => {
     e.stopPropagation();
     e.preventDefault();
-    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
+    if (id !== SHELL_ID) {
+      if (isBorderId(project, id)) {
+        const node = containerForBorder(project, id);
+        if (node && isNodeLocked(project, node.id)) return;
+      } else if (isShapeLocked(project, id)) return;
+    }
     if (verts.length === 0) return;
     let cx = 0;
     let cy = 0;
@@ -842,12 +898,18 @@ export default function ManualCanvas({
   const shellLive = shellV ? liveVertsFor(SHELL_ID, shellV) : null;
   const isShellSel = selectedId === SHELL_ID;
 
-  const selectedShape = selectedId && selectedId !== SHELL_ID ? shapes.find((s) => s.id === selectedId) : null;
+  const selectedBorder = selectedId && isBorderId(project, selectedId) ? borderById(project, selectedId) : null;
+  const selectedShape =
+    selectedId && selectedId !== SHELL_ID && !selectedBorder
+      ? shapes.find((s) => s.id === selectedId)
+      : null;
   const selectedVerts = selectedShape
     ? liveVertsFor(selectedShape.id, shapeVerts(selectedShape))
-    : isShellSel && shellLive
-      ? shellLive
-      : null;
+    : selectedBorder
+      ? liveVertsFor(selectedBorder.id, borderVertsOf(selectedBorder))
+      : isShellSel && shellLive
+        ? shellLive
+        : null;
 
   const cursorClass =
     tool === "select" || tool === "badge"
@@ -855,7 +917,7 @@ export default function ManualCanvas({
       : "cursor-crosshair";
 
   const previewStroke =
-    poly?.kind === "shell" || tool === "shell"
+    poly?.kind === "shell" || tool === "shell" || poly?.kind === "border" || tool === "border"
       ? "#111827"
       : poly?.kind === "line" || tool === "line"
         ? getLineDefaults(project).color
@@ -896,6 +958,133 @@ export default function ManualCanvas({
     draftVerts.length > 0
       ? flattenPolyVertsOpen(draftVerts, drawingPolyLike && !placing && poly ? poly.cur : undefined)
       : [];
+
+  const layerTree = getLayerTree(project);
+  const activeBorderContainerId =
+    tool === "border" && layerTree.activeContainerId && borderIdForNode(project, layerTree.activeContainerId)
+      ? layerTree.activeContainerId
+      : null;
+  const dimForAncestors = (ancestors: string[]) =>
+    !!activeBorderContainerId && !ancestors.includes(activeBorderContainerId);
+
+  const paintFills = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind === "leaf") {
+        const s = shapes.find((x) => x.id === n.shapeId);
+        if (!s || !isShapeVisible(project, s.id)) return null;
+        const dim = dimForAncestors(ancestors);
+        const verts = liveVertsFor(s.id, shapeVerts(s));
+        if (isLineShape(s)) {
+          const isSel = s.id === selectedId;
+          const isHov = hovered === s.id;
+          const ls = shapeLineStroke(s, project);
+          const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
+          const sw = isSel ? ls.width * 1.6 : ls.width;
+          return (
+            <path
+              key={`f-${s.id}`}
+              d={pathDFromVerts(verts, false)}
+              fill="none"
+              stroke={stroke}
+              strokeWidth={sw}
+              strokeDasharray={dashArray(sw, s.dash)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              opacity={dim ? 0.4 : 1}
+              pointerEvents="none"
+            />
+          );
+        }
+        return (
+          <path
+            key={`f-${s.id}`}
+            d={pathDFromVerts(verts)}
+            fill={s.fill || defaultFill(s.category)}
+            stroke="none"
+            opacity={dim ? 0.4 : 1}
+            pointerEvents="none"
+          />
+        );
+      }
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const kids = paintFills(n.children, [...ancestors, n.id]);
+      if (border?.clip) {
+        return (
+          <g key={`f-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      return <g key={`f-${n.id}`}>{kids}</g>;
+    });
+
+  const paintStrokes = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind === "leaf") {
+        const s = shapes.find((x) => x.id === n.shapeId);
+        if (!s || !isShapeVisible(project, s.id) || isLineShape(s)) return null;
+        const dim = dimForAncestors(ancestors);
+        const verts = liveVertsFor(s.id, shapeVerts(s));
+        const isSel = s.id === selectedId;
+        const isHov = hovered === s.id;
+        const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
+        const sw = isSel ? strokeW * 1.6 : strokeW;
+        return (
+          <path
+            key={`o-${s.id}`}
+            d={pathDFromVerts(verts)}
+            fill="none"
+            stroke={stroke}
+            strokeWidth={sw}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity={dim ? 0.4 : 1}
+            pointerEvents="none"
+          />
+        );
+      }
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const kids = paintStrokes(n.children, [...ancestors, n.id]);
+      if (border?.clip) {
+        return (
+          <g key={`o-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      return <g key={`o-${n.id}`}>{kids}</g>;
+    });
+
+  const paintBorderOutlines = (nodes: ManualNode[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind !== "container") return null;
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const bv = border ? liveVertsFor(border.id, borderVertsOf(border)) : null;
+      const isSel = border ? selectedId === border.id : false;
+      return (
+        <g key={`bo-${n.id}`}>
+          {bv && bv.length >= 2 && border && (
+            <path
+              d={pathDFromVerts(bv)}
+              fill="none"
+              stroke={isSel ? BRAND : border.stroke.color}
+              strokeWidth={isSel ? border.stroke.width * 2 : border.stroke.width}
+              strokeDasharray={dashArray(border.stroke.width, border.dash)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              className={tool === "select" ? "cursor-move" : ""}
+              pointerEvents={tool === "select" ? "stroke" : "none"}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => beginMove(e, bv, border.id)}
+            />
+          )}
+          {paintBorderOutlines(n.children)}
+        </g>
+      );
+    });
 
   return (
     <div className="relative h-full w-full overflow-hidden checkerboard">
@@ -949,14 +1138,22 @@ export default function ManualCanvas({
       {draftPaused && poly && (
         <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink/90 px-3 py-1.5 text-xs text-white shadow">
           <span>
-            {poly.kind === "shell" ? "Shell" : poly.kind === "line" ? "Line" : "Polygon"} in progress ({poly.verts.length} pts)
+            {poly.kind === "shell"
+              ? "Shell"
+              : poly.kind === "border"
+                ? "Border"
+                : poly.kind === "line"
+                  ? "Line"
+                  : "Polygon"}{" "}
+            in progress ({poly.verts.length} pts)
           </span>
           <button
             type="button"
             className="rounded bg-brand px-2 py-0.5 font-medium text-white"
             onClick={() => onRequestTool?.(poly.kind)}
           >
-            Continue ({poly.kind === "shell" ? "O" : poly.kind === "line" ? "L" : "P"})
+            Continue (
+            {poly.kind === "shell" ? "O" : poly.kind === "border" ? "B" : poly.kind === "line" ? "L" : "P"})
           </button>
           <span className="text-white/60">Esc cancel · Space pan</span>
         </div>
@@ -995,6 +1192,16 @@ export default function ManualCanvas({
               <path d={pathDFromVerts(shellLive)} />
             </clipPath>
           )}
+          {getBorders(project).map((b) => {
+            if (!b.clip) return null;
+            const verts = liveVertsFor(b.id, borderVertsOf(b));
+            if (verts.length < 3) return null;
+            return (
+              <clipPath key={b.id} id={`mc-border-${b.id}`}>
+                <path d={pathDFromVerts(verts)} />
+              </clipPath>
+            );
+          })}
         </defs>
         <g
           ref={contentRef}
@@ -1020,58 +1227,9 @@ export default function ManualCanvas({
 
             {/* Clip unit paint to shell; hit targets + vertex handles stay outside so edge edits remain usable. */}
             <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
-              {paintOrder.map((s) => {
-                const verts = liveVertsFor(s.id, shapeVerts(s));
-                if (isLineShape(s)) {
-                  const isSel = s.id === selectedId;
-                  const isHov = hovered === s.id;
-                  const ls = shapeLineStroke(s, project);
-                  const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
-                  const sw = isSel ? ls.width * 1.6 : ls.width;
-                  return (
-                    <path
-                      key={`f-${s.id}`}
-                      d={pathDFromVerts(verts, false)}
-                      fill="none"
-                      stroke={stroke}
-                      strokeWidth={sw}
-                      strokeDasharray={dashArray(sw, s.dash)}
-                      strokeLinejoin="round"
-                      strokeLinecap="round"
-                      pointerEvents="none"
-                    />
-                  );
-                }
-                return (
-                  <path
-                    key={`f-${s.id}`}
-                    d={pathDFromVerts(verts)}
-                    fill={s.fill || defaultFill(s.category)}
-                    stroke="none"
-                    pointerEvents="none"
-                  />
-                );
-              })}
-              {paintOrder.map((s) => {
-                if (isLineShape(s)) return null;
-                const verts = liveVertsFor(s.id, shapeVerts(s));
-                const isSel = s.id === selectedId;
-                const isHov = hovered === s.id;
-                const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
-                const sw = isSel ? strokeW * 1.6 : strokeW;
-                return (
-                  <path
-                    key={`o-${s.id}`}
-                    d={pathDFromVerts(verts)}
-                    fill="none"
-                    stroke={stroke}
-                    strokeWidth={sw}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                    pointerEvents="none"
-                  />
-                );
-              })}
+              {paintFills(layerTree.root, [])}
+              {paintStrokes(layerTree.root, [])}
+              {paintBorderOutlines(layerTree.root)}
             </g>
 
             {shellLive && (
@@ -1346,9 +1504,12 @@ export default function ManualCanvas({
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
           {poly?.kind === "shell" || tool === "shell"
             ? "Shell"
-            : poly?.kind === "line" || tool === "line"
-              ? "Line"
-              : "Polygon"} ·{" "}
+            : poly?.kind === "border" || tool === "border"
+              ? "Border"
+              : poly?.kind === "line" || tool === "line"
+                ? "Line"
+                : "Polygon"}{" "}
+          ·{" "}
           {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
           pan · ⌘Z undo · Enter close · Esc cancel
         </div>

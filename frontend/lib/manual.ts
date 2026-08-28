@@ -26,6 +26,18 @@ export interface ManualShape {
   dash?: "solid" | "dash";
 }
 
+/** Inner clip-region + grouper. Multiple allowed; referenced from a container node. */
+export interface ManualBorder {
+  id: string;
+  points: Point[];
+  verts?: PolyVert[];
+  stroke: ManualStroke;
+  dash?: "solid" | "dash";
+  /** Clip descendant units to this region (default true). */
+  clip: boolean;
+  name?: string;
+}
+
 /** Tenant block stroke (white separators between units). */
 export interface ManualStroke {
   color: string;
@@ -42,10 +54,14 @@ export interface ManualProject {
   shell?: Point[] | null;
   /** Bezier verts for shell when drawn with pen curves. */
   shellVerts?: PolyVert[] | null;
+  /** Inner clip regions (optional). */
+  borders?: ManualBorder[];
   /** Stroke for tenant rect/poly (default white). */
   stroke?: ManualStroke;
   /** Default stroke + dash for newly drawn lines. */
   lineDefaults?: ManualStroke & { dash?: "solid" | "dash" };
+  /** Default stroke + dash for newly drawn borders. */
+  borderDefaults?: ManualStroke & { dash?: "solid" | "dash" };
   /** Outer shell outline stroke (default white). Independent of tenant stroke. */
   shellStroke?: ManualStroke;
   /** Editor-only opacity for drawn shapes/shell (0.05–1). Export stays full. */
@@ -103,6 +119,8 @@ export interface ManualContainerNode extends ManualNodeCommon {
   collapsed?: boolean;
   /** Ordered back→front (model order); paint/emit iterate as-is, panel reverses. */
   children: ManualNode[];
+  /** When set, this container is a Border region (geometry in project.borders). */
+  borderId?: string;
 }
 
 export interface ManualLeafNode extends ManualNodeCommon {
@@ -147,6 +165,7 @@ interface LegacyLayerTree {
 export const DEFAULT_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
 export const DEFAULT_SHELL_STROKE: ManualStroke = { color: "#FFFFFF", width: 2 };
 export const DEFAULT_LINE_STROKE: ManualStroke = { color: "#111827", width: 3 };
+export const DEFAULT_BORDER_STROKE: ManualStroke = { color: "#111827", width: 2 };
 export const DEFAULT_DRAW_OPACITY = 1;
 export const DEFAULT_PNG_SCALE = 1;
 export const EXPORT_WIDTH_MIN = 400;
@@ -471,8 +490,45 @@ export function orderedShapeIds(project: ManualProject): string[] {
 /** Store a fully-normalized (migrated + reconciled) tree on the project. */
 export function ensureLayerTree(project: ManualProject): ManualProject {
   const tree = getLayerTree(project);
-  if (project.layerTree === tree) return project;
-  return { ...project, layerTree: tree };
+  const withTree = project.layerTree === tree ? project : { ...project, layerTree: tree };
+  return reconcileBorders(withTree);
+}
+
+function collectBorderIds(nodes: ManualNode[], out: Set<string>): void {
+  for (const n of nodes) {
+    if (n.kind === "container") {
+      if (n.borderId) out.add(n.borderId);
+      collectBorderIds(n.children, out);
+    }
+  }
+}
+
+function reconcileBorders(project: ManualProject): ManualProject {
+  const tree = project.layerTree ?? emptyLayerTree();
+  const borders = getBorders(project);
+  const valid = new Set(borders.map((b) => b.id));
+  let stripped = false;
+  const walk = (nodes: ManualNode[]): ManualNode[] =>
+    nodes.map((n) => {
+      if (n.kind !== "container") return n;
+      const children = walk(n.children);
+      if (n.borderId && !valid.has(n.borderId)) {
+        stripped = true;
+        return { ...n, borderId: undefined, children };
+      }
+      return children === n.children ? n : { ...n, children };
+    });
+  const root = walk(tree.root);
+  const referenced = new Set<string>();
+  collectBorderIds(root, referenced);
+  const nextBorders = borders.filter((b) => referenced.has(b.id));
+  const bordersChanged = nextBorders.length !== borders.length;
+  if (!stripped && !bordersChanged && root === tree.root) return project;
+  return {
+    ...project,
+    borders: bordersChanged ? nextBorders : project.borders,
+    layerTree: { ...tree, root },
+  };
 }
 
 /** Create an empty container in parentId (null = root front) and make it active. */
@@ -547,6 +603,80 @@ export function setActiveContainer(project: ManualProject, nodeId: string | null
   return { ...p, layerTree: { ...p.layerTree!, activeContainerId: nodeId } };
 }
 
+export function createBorder(
+  project: ManualProject,
+  verts: PolyVert[],
+  parentId: string | null = null,
+): ManualProject {
+  const p = ensureLayerTree(project);
+  const tree = p.layerTree!;
+  const d = getBorderDefaults(p);
+  const synced = { verts, points: flattenPolyVerts(verts) };
+  const border: ManualBorder = {
+    id: newBorderId(),
+    points: synced.points,
+    verts: synced.verts,
+    stroke: { color: d.color, width: d.width },
+    dash: d.dash,
+    clip: true,
+  };
+  const node: ManualContainerNode = {
+    id: newNodeId("g"),
+    kind: "container",
+    name: `Border ${getBorders(p).length + 1}`,
+    locked: false,
+    visible: true,
+    collapsed: false,
+    children: [],
+    borderId: border.id,
+  };
+  const parent = parentId ? findNode(tree, parentId) : null;
+  const targetParentId = parent && parent.node.kind === "container" ? parentId : null;
+  const siblings =
+    targetParentId != null
+      ? (findNode(tree, targetParentId)!.node as ManualContainerNode).children
+      : tree.root;
+  const root = insertNodeInto(tree.root, targetParentId, siblings.length, node);
+  return {
+    ...p,
+    borders: [...getBorders(p), border],
+    layerTree: { ...tree, root, activeContainerId: node.id },
+  };
+}
+
+export function updateBorderVerts(project: ManualProject, borderId: string, verts: PolyVert[]): ManualProject {
+  const points = flattenPolyVerts(verts);
+  return {
+    ...project,
+    borders: getBorders(project).map((b) =>
+      b.id === borderId ? { ...b, verts, points } : b,
+    ),
+  };
+}
+
+export function patchBorder(
+  project: ManualProject,
+  borderId: string,
+  patch: Partial<Pick<ManualBorder, "stroke" | "dash" | "clip" | "name">>,
+): ManualProject {
+  let next: ManualProject = {
+    ...project,
+    borders: getBorders(project).map((b) => (b.id === borderId ? { ...b, ...patch } : b)),
+  };
+  if (patch.name != null) {
+    const node = containerForBorder(next, borderId);
+    if (node) next = patchNode(next, node.id, { name: patch.name });
+  }
+  return next;
+}
+
+/** Remove border geometry and ungroup its container (children stay). */
+export function deleteBorder(project: ManualProject, borderId: string): ManualProject {
+  const node = containerForBorder(project, borderId);
+  const p = node ? deleteContainers(project, [node.id]) : project;
+  return { ...p, borders: getBorders(p).filter((b) => b.id !== borderId) };
+}
+
 /** Delete container nodes; their children are promoted into the parent (shapes kept). */
 export function deleteContainers(project: ManualProject, nodeIds: string[]): ManualProject {
   let p = ensureLayerTree(project);
@@ -566,7 +696,7 @@ export function deleteContainers(project: ManualProject, nodeIds: string[]): Man
     const activeContainerId = tree.activeContainerId === id ? null : tree.activeContainerId;
     p = { ...p, layerTree: { ...tree, root, activeContainerId } };
   }
-  return p;
+  return ensureLayerTree(p);
 }
 
 /**
@@ -709,6 +839,60 @@ export function shapeLineStroke(s: ManualShape, project: ManualProject | null | 
   return { color: d.color, width: d.width };
 }
 
+export type BorderStyle = ManualStroke & { dash: "solid" | "dash" };
+
+export function getBorderDefaults(project: ManualProject | null | undefined): BorderStyle {
+  const s = project?.borderDefaults;
+  return {
+    color: typeof s?.color === "string" && s.color ? s.color : DEFAULT_BORDER_STROKE.color,
+    width: Math.max(1, Math.min(24, Number(s?.width) || DEFAULT_BORDER_STROKE.width)),
+    dash: s?.dash === "dash" ? "dash" : "solid",
+  };
+}
+
+let borderIdCounter = 0;
+export function newBorderId(): string {
+  borderIdCounter += 1;
+  return `b${Date.now().toString(36)}${borderIdCounter}`;
+}
+
+export function getBorders(project: ManualProject | null | undefined): ManualBorder[] {
+  return project?.borders ?? [];
+}
+
+export function borderById(project: ManualProject | null | undefined, id: string): ManualBorder | null {
+  return getBorders(project).find((b) => b.id === id) ?? null;
+}
+
+export function borderVertsOf(b: ManualBorder): PolyVert[] {
+  if (b.verts && b.verts.length >= 3) return b.verts;
+  return (b.points ?? []).map((p) => ({ p }));
+}
+
+export function isBorderId(project: ManualProject | null | undefined, id: string | null): boolean {
+  return !!id && !!borderById(project, id);
+}
+
+function findContainerForBorder(nodes: ManualNode[], borderId: string): ManualContainerNode | null {
+  for (const n of nodes) {
+    if (n.kind === "container") {
+      if (n.borderId === borderId) return n;
+      const inner = findContainerForBorder(n.children, borderId);
+      if (inner) return inner;
+    }
+  }
+  return null;
+}
+
+export function containerForBorder(project: ManualProject, borderId: string): ManualContainerNode | null {
+  return findContainerForBorder(getLayerTree(project).root, borderId);
+}
+
+export function borderIdForNode(project: ManualProject, nodeId: string): string | null {
+  const f = findNode(getLayerTree(project), nodeId);
+  return f && f.node.kind === "container" ? f.node.borderId ?? null : null;
+}
+
 export function getDrawOpacity(project: ManualProject | null | undefined): number {
   const v = project?.drawOpacity;
   if (typeof v !== "number" || Number.isNaN(v)) return DEFAULT_DRAW_OPACITY;
@@ -766,6 +950,12 @@ export function contentBBox(project: ManualProject): {
     }
   };
   if (shellPts) consider(shellPts);
+  for (const b of getBorders(project)) {
+    const node = containerForBorder(project, b.id);
+    if (node && !isNodeVisible(project, node.id)) continue;
+    const ring = b.points?.length >= 3 ? b.points : flattenPolyVerts(borderVertsOf(b));
+    consider(ring);
+  }
   for (const s of project.shapes) {
     if (!isShapeVisible(project, s.id)) continue;
     const ring =
@@ -1352,12 +1542,38 @@ export function emitManualSvg(
     `  <title>${esc(title)} - ${esc(project.floor)}</title>`,
   ];
 
-  if (shellNorm) {
+  const borderClipDefs: string[] = [];
+  const collectBorderClips = (nodes: ManualNode[]) => {
+    for (const n of nodes) {
+      if (n.kind !== "container") continue;
+      if (!isNodeVisible(project, n.id)) continue;
+      if (n.borderId) {
+        const b = borderById(project, n.borderId);
+        if (b?.clip) {
+          const bv = borderVertsOf(b).map((v) => normVert(v, norm));
+          if (bv.length >= 3) {
+            borderClipDefs.push(
+              `    <clipPath id="border-clip-${esc(b.id)}">\n      <path d="${pathDFromVerts(bv)}"/>\n    </clipPath>`,
+            );
+          }
+        }
+      }
+      collectBorderClips(n.children);
+    }
+  };
+  collectBorderClips(tree.root);
+
+  if (shellNorm || borderClipDefs.length) {
     o.push(`  <defs>`);
-    o.push(`    <clipPath id="shell">`);
-    o.push(`      <path d="${d(shellNorm)}"/>`);
-    o.push(`    </clipPath>`);
+    if (shellNorm) {
+      o.push(`    <clipPath id="shell">`);
+      o.push(`      <path d="${d(shellNorm)}"/>`);
+      o.push(`    </clipPath>`);
+    }
+    for (const clip of borderClipDefs) o.push(clip);
     o.push(`  </defs>`);
+  }
+  if (shellNorm) {
     o.push(`  <g id="shell">`);
     o.push(
       `    <path fill="${cfg.shellFill}" stroke="${shellStrokeHex}" stroke-width="${shellStrokeW.toFixed(2)}" ` +
@@ -1407,13 +1623,41 @@ export function emitManualSvg(
         `stroke-linecap="round" d="${dd}"/>`,
     );
   };
+  let borderCount = 0;
   const emitNodes = (nodes: ManualNode[], indent: string) => {
     for (const n of nodes) {
       if (n.kind === "leaf") {
         emitLeaf(n.shapeId, indent);
         continue;
       }
-      if (!isNodeVisible(project, n.id)) continue; // skip hidden subtree
+      if (!isNodeVisible(project, n.id)) continue;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      if (border) {
+        borderCount += 1;
+        const bid = `border-${String(borderCount).padStart(2, "0")}`;
+        const nm = n.name ? ` data-name="${esc(n.name)}"` : "";
+        o.push(
+          `${indent}<g id="${bid}" data-kind="border" data-border-id="${esc(border.id)}"${nm}>`,
+        );
+        const bv = borderVertsOf(border).map((v) => normVert(v, norm));
+        const dd = bv.length >= 2 ? pathDFromVerts(bv) : d(flattenPolyVerts(bv));
+        const bw = border.stroke.width * scale;
+        const dash = dashArray(bw, border.dash);
+        const dashAttr = dash ? ` stroke-dasharray="${dash}"` : "";
+        o.push(
+          `${indent}  <path data-kind="border" fill="none" stroke="${border.stroke.color}" ` +
+            `stroke-width="${bw.toFixed(2)}" stroke-linejoin="round" stroke-linecap="round"${dashAttr} d="${dd}"/>`,
+        );
+        if (border.clip) {
+          o.push(`${indent}  <g clip-path="url(#border-clip-${esc(border.id)})">`);
+          emitNodes(n.children, indent + "    ");
+          o.push(`${indent}  </g>`);
+        } else {
+          emitNodes(n.children, indent + "  ");
+        }
+        o.push(`${indent}</g>`);
+        continue;
+      }
       const nm = n.name ? ` data-name="${esc(n.name)}"` : "";
       o.push(`${indent}<g id="node-${n.id}"${nm}>`);
       emitNodes(n.children, indent + "  ");
@@ -1536,10 +1780,46 @@ export function parseManualSvg(svgText: string): ManualProject {
 
   // shapes + layer tree: walk <g id="units"> recursively, mirroring emitNodes()
   const shapes: ManualShape[] = [];
+  const borders: ManualBorder[] = [];
   const walk = (parent: Element): ManualNode[] => {
     const out: ManualNode[] = [];
     for (const el of Array.from(parent.children)) {
-      if (el.tagName === "g" && (el.getAttribute("id") ?? "").startsWith("node-")) {
+      if (el.tagName === "g" && el.getAttribute("data-kind") === "border") {
+        const outline = Array.from(el.children).find(
+          (c) => c.tagName === "path" && c.getAttribute("data-kind") === "border",
+        ) as SVGPathElement | undefined;
+        const bid = el.getAttribute("data-border-id") || newBorderId();
+        if (outline) {
+          const verts = parsePathD(outline.getAttribute("d") ?? "");
+          if (verts.length >= 3) {
+            const sw = parseFloat(outline.getAttribute("stroke-width") || "");
+            const dashAttr = outline.getAttribute("stroke-dasharray");
+            borders.push({
+              id: bid,
+              points: verts.map((v) => v.p),
+              verts,
+              stroke: {
+                color: outline.getAttribute("stroke") || DEFAULT_BORDER_STROKE.color,
+                width: Number.isFinite(sw) && sw > 0 ? sw : DEFAULT_BORDER_STROKE.width,
+              },
+              dash: dashAttr && dashAttr.trim() ? "dash" : "solid",
+              clip: !!el.querySelector(":scope > g[clip-path]"),
+              name: el.getAttribute("data-name") || undefined,
+            });
+          }
+        }
+        out.push({
+          id: newNodeId("g"),
+          kind: "container",
+          name: el.getAttribute("data-name") ?? "",
+          locked: false,
+          visible: true,
+          children: walk(el),
+          borderId: bid,
+        });
+      } else if (el.tagName === "path" && el.getAttribute("data-kind") === "border") {
+        continue;
+      } else if (el.tagName === "g" && (el.getAttribute("id") ?? "").startsWith("node-")) {
         out.push({
           id: newNodeId(),
           kind: "container",
@@ -1663,6 +1943,7 @@ export function parseManualSvg(svgText: string): ManualProject {
     shapes,
     shell,
     shellVerts: shellVerts.length >= 3 ? shellVerts : null,
+    borders,
     stroke,
     shellStroke,
     layerTree: { root, activeContainerId: null },
@@ -1731,9 +2012,11 @@ export function newProject(floor: string): ManualProject {
     shapes: [],
     shell: null,
     shellVerts: null,
+    borders: [],
     stroke: { ...DEFAULT_STROKE },
     shellStroke: { ...DEFAULT_SHELL_STROKE },
     lineDefaults: { ...DEFAULT_LINE_STROKE, dash: "solid" },
+    borderDefaults: { ...DEFAULT_BORDER_STROKE, dash: "solid" },
     drawOpacity: DEFAULT_DRAW_OPACITY,
     exportNormalizedWidth: AEON_CONFIG.normalizedWidth,
     pngScale: DEFAULT_PNG_SCALE,
