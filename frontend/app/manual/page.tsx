@@ -61,6 +61,9 @@ import {
   borderIdForNode,
   borderVertsOf,
   isBorderId,
+  isBorderGroup,
+  selectionIsAllBorders,
+  fillFromBorderSelection,
   containerForBorder,
   updateBorderVerts as applyBorderVerts,
   patchBorder,
@@ -793,8 +796,31 @@ export default function ManualPage() {
     updateActive((p) => createContainer(p, activeContainerId ?? null), { label: "New group" });
   const doGroup = () => {
     if (!project || selectedNodeIds.length < 1) return;
-    updateActive((p) => groupNodes(p, selectedNodeIds), { label: "Group" });
+    const borders = selectionIsAllBorders(project, selectedNodeIds);
+    updateActive((p) => groupNodes(p, selectedNodeIds), {
+      label: borders ? "Group borders" : "Group",
+    });
     setSelectedNodeIds([]);
+  };
+  const doFillBorders = () => {
+    if (!project) return;
+    let newId: string | null = null;
+    let groupId: string | null = null;
+    updateActive(
+      (p) => {
+        const before = new Set(p.shapes.map((s) => s.id));
+        const next = fillFromBorderSelection(p, selectedNodeIds, drawCat);
+        newId = next.shapes.find((s) => !before.has(s.id))?.id ?? null;
+        groupId = next.layerTree?.activeContainerId ?? null;
+        return next;
+      },
+      { label: "Fill border group" },
+    );
+    if (newId) {
+      setSelectedId(newId);
+      setSelectedVertIndex(null);
+    }
+    if (groupId) setSelectedNodeIds([groupId]);
   };
   const doDeleteNodes = () => {
     if (!project) return;
@@ -1150,6 +1176,20 @@ export default function ManualPage() {
   );
   const shellSelected = selectedId === SHELL_ID;
   const selectedBorder = project && selectedId ? borderById(project, selectedId) : null;
+  const activeIsBorderGroup = useMemo(() => {
+    if (!project || !activeContainerId) return false;
+    const f = findNode(getLayerTree(project), activeContainerId);
+    return !!f && isBorderGroup(f.node);
+  }, [project, activeContainerId]);
+  const canFillBorders = useMemo(() => {
+    if (!project) return false;
+    if (activeIsBorderGroup) return true;
+    if (selectedNodeIds.length === 1) {
+      const f = findNode(getLayerTree(project), selectedNodeIds[0]);
+      if (f && isBorderGroup(f.node)) return true;
+    }
+    return selectionIsAllBorders(project, selectedNodeIds);
+  }, [project, activeIsBorderGroup, selectedNodeIds]);
   const hasImage = !!project?.bg.dataUrl;
   const shellPts = project?.shell && project.shell.length >= 3 ? project.shell : null;
   const borderList = project ? getBorders(project) : [];
@@ -1296,7 +1336,7 @@ export default function ManualPage() {
                 </button>
               ))}
             </div>
-            {tool !== "line" && tool !== "border" && (
+            {tool !== "line" && (
               <>
                 <div className="mb-2 text-xs text-neutral-600">Draw as</div>
                 <div className="mb-3 flex flex-wrap gap-1">
@@ -1527,12 +1567,14 @@ export default function ManualPage() {
             );
           })()}
 
-          {(tool === "border" || selectedBorder) && (
+          {(tool === "border" || selectedBorder || canFillBorders) && (
               <Section title="Border">
                 <p className="mb-2 text-xs text-neutral-600">
                   {selectedBorder
                     ? "Clip region of the selected border. New shapes go inside the active border."
-                    : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points)."}
+                    : canFillBorders
+                      ? "Group 2+ borders, then Fill or draw into the group. Both regions share one fill."
+                      : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points)."}
                 </p>
                 <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
                   Color
@@ -1575,6 +1617,15 @@ export default function ManualPage() {
                     </button>
                   ))}
                 </div>
+                {canFillBorders && (
+                  <button
+                    type="button"
+                    className="mb-2 w-full rounded bg-brand px-2 py-1.5 text-xs font-medium text-white hover:bg-brand-hover"
+                    onClick={doFillBorders}
+                  >
+                    Fill with {CATEGORY_LABEL[drawCat]}
+                  </button>
+                )}
                 {selectedBorder && (
                   <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
                     <input
@@ -1974,7 +2025,7 @@ export default function ManualPage() {
               {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "border" &&
-                "Trace clip region · click/drag curves · Enter finish (3+ pts) · exact cursor · Space = pan"}
+                "Trace clip region · Group 2+ borders then Fill · Enter finish (3+ pts) · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&
                 "Alt-drag from selected point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}

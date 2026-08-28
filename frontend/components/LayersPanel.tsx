@@ -75,6 +75,7 @@ function shapeLabel(s: ManualShape): string {
 function nodeLabel(node: ManualNode, shapeMap: Map<string, ManualShape>): string {
   if (node.kind === "container") {
     if (node.borderId) return node.name?.trim() || "Border";
+    if (node.borderGroup) return node.name?.trim() || "Border group";
     return node.name || "Group";
   }
   if (node.name?.trim()) return node.name.trim();
@@ -274,6 +275,13 @@ export default function LayersPanel({
                 className="ml-0.5 h-2.5 w-2.5 shrink-0 rounded-sm ring-1 ring-black/10"
                 style={{ background: leafShape.fill }}
               />
+            ) : node.kind === "container" && node.borderGroup ? (
+              <span className="ml-0.5 shrink-0 text-neutral-400" title="Border group">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+                  <rect x="2" y="5" width="12" height="12" rx="1" strokeDasharray="3 2" />
+                  <rect x="10" y="7" width="12" height="12" rx="1" strokeDasharray="3 2" />
+                </svg>
+              </span>
             ) : node.kind === "container" && node.borderId ? (
               <span className="ml-0.5 shrink-0 text-neutral-400" title="Border">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
@@ -320,7 +328,15 @@ export default function LayersPanel({
           onClick={onGroup}
           disabled={!canGroup}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300 disabled:opacity-40"
-          title="Group selection (⌘G)"
+          title={
+            selectedIds.length >= 2 &&
+            selectedIds.every((id) => {
+              const f = findNode(tree, id);
+              return !!f && f.node.kind === "container" && !!f.node.borderId;
+            })
+              ? "Group borders into a clip set (⌘G)"
+              : "Group selection (⌘G)"
+          }
         >
           Group
         </button>

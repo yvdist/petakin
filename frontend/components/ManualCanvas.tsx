@@ -15,12 +15,16 @@ import {
   getLineDefaults,
   getBorders,
   borderById,
-  borderIdForNode,
   borderVertsOf,
   containerForBorder,
   isBorderId,
+  isBorderGroup,
+  collectBorderGroupNodes,
+  borderGroupClipVerts,
+  directChildBorders,
   isNodeVisible,
   isNodeLocked,
+  findNode,
   getShellStroke,
   getStroke,
   insertVertOnEdge,
@@ -978,12 +982,17 @@ export default function ManualCanvas({
       : [];
 
   const layerTree = getLayerTree(project);
-  const activeBorderContainerId =
-    tool === "border" && layerTree.activeContainerId && borderIdForNode(project, layerTree.activeContainerId)
-      ? layerTree.activeContainerId
-      : null;
+  const activeClipContainerId = (() => {
+    const id = layerTree.activeContainerId;
+    if (!id) return null;
+    const f = findNode(layerTree, id);
+    if (!f || f.node.kind !== "container") return null;
+    if (isBorderGroup(f.node)) return id;
+    if (tool === "border" && f.node.borderId) return id;
+    return null;
+  })();
   const dimForAncestors = (ancestors: string[]) =>
-    !!activeBorderContainerId && !ancestors.includes(activeBorderContainerId);
+    !!activeClipContainerId && !ancestors.includes(activeClipContainerId);
 
   const paintFills = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
     nodes.map((n) => {
@@ -1034,6 +1043,13 @@ export default function ManualCanvas({
           </g>
         );
       }
+      if (isBorderGroup(n) && borderGroupClipVerts(project, n).length >= 1) {
+        return (
+          <g key={`f-${n.id}`} clipPath={`url(#mc-bgroup-${n.id})`}>
+            {kids}
+          </g>
+        );
+      }
       return <g key={`f-${n.id}`}>{kids}</g>;
     });
 
@@ -1068,6 +1084,13 @@ export default function ManualCanvas({
       if (border?.clip) {
         return (
           <g key={`o-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      if (isBorderGroup(n) && borderGroupClipVerts(project, n).length >= 1) {
+        return (
+          <g key={`o-${n.id}`} clipPath={`url(#mc-bgroup-${n.id})`}>
             {kids}
           </g>
         );
@@ -1216,6 +1239,19 @@ export default function ManualCanvas({
             return (
               <clipPath key={b.id} id={`mc-border-${b.id}`}>
                 <path d={pathDFromVerts(verts)} />
+              </clipPath>
+            );
+          })}
+          {collectBorderGroupNodes(layerTree.root).map((n) => {
+            const rings = directChildBorders(project, n)
+              .map((b) => ({ id: b.id, verts: liveVertsFor(b.id, borderVertsOf(b)) }))
+              .filter((r) => r.verts.length >= 3);
+            if (!rings.length) return null;
+            return (
+              <clipPath key={n.id} id={`mc-bgroup-${n.id}`}>
+                {rings.map((r) => (
+                  <path key={r.id} d={pathDFromVerts(r.verts)} />
+                ))}
               </clipPath>
             );
           })}
