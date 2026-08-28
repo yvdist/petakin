@@ -63,11 +63,15 @@ import {
   isBorderId,
   isBorderGroup,
   selectionIsAllBorders,
-  fillFromBorderSelection,
+  fillBorderGroup,
+  borderGroupMemberNodeIds,
+  enclosingBorderGroup,
   containerForBorder,
   updateBorderVerts as applyBorderVerts,
   patchBorder,
   deleteBorder as removeBorder,
+  deleteNodeDeep,
+  reorderNodeInParent,
   getPngScale,
   getShellStroke,
   getStroke,
@@ -786,6 +790,13 @@ export default function ManualPage() {
           return;
         }
       }
+      const loc = findNode(getLayerTree(project), id);
+      if (loc && isBorderGroup(loc.node)) {
+        const members = borderGroupMemberNodeIds(project, id);
+        setSelectedNodeIds([id, ...members]);
+        syncCanvas(members[0] ?? id);
+        return;
+      }
       setSelectedNodeIds([id]);
       syncCanvas(id);
     },
@@ -797,30 +808,19 @@ export default function ManualPage() {
   const doGroup = () => {
     if (!project || selectedNodeIds.length < 1) return;
     const borders = selectionIsAllBorders(project, selectedNodeIds);
+    const grouped = groupNodes(project, selectedNodeIds);
     updateActive((p) => groupNodes(p, selectedNodeIds), {
       label: borders ? "Group borders" : "Group",
     });
-    setSelectedNodeIds([]);
-  };
-  const doFillBorders = () => {
-    if (!project) return;
-    let newId: string | null = null;
-    let groupId: string | null = null;
-    updateActive(
-      (p) => {
-        const before = new Set(p.shapes.map((s) => s.id));
-        const next = fillFromBorderSelection(p, selectedNodeIds, drawCat);
-        newId = next.shapes.find((s) => !before.has(s.id))?.id ?? null;
-        groupId = next.layerTree?.activeContainerId ?? null;
-        return next;
-      },
-      { label: "Fill border group" },
-    );
-    if (newId) {
-      setSelectedId(newId);
-      setSelectedVertIndex(null);
+    if (borders) {
+      const gid = grouped.layerTree?.activeContainerId;
+      if (gid) {
+        const members = borderGroupMemberNodeIds(grouped, gid);
+        setSelectedNodeIds([gid, ...members]);
+        return;
+      }
     }
-    if (groupId) setSelectedNodeIds([groupId]);
+    setSelectedNodeIds([]);
   };
   const doDeleteNodes = () => {
     if (!project) return;
@@ -904,6 +904,233 @@ export default function ManualPage() {
       });
     },
     [updateActive],
+  );
+
+  const nodeIdFromAny = useCallback(
+    (id: string): string | null => {
+      if (!project || id === SHELL_ID) return null;
+      if (findNode(getLayerTree(project), id)) return id;
+      if (isBorderId(project, id)) return containerForBorder(project, id)?.id ?? null;
+      return nodeIdForShape(project, id);
+    },
+    [project],
+  );
+
+  const duplicateShapeById = useCallback(
+    (shapeId: string) => {
+      if (!project || shapeId === SHELL_ID || isBorderId(project, shapeId)) return;
+      updateActive(
+        (p) => {
+          const src = p.shapes.find((s) => s.id === shapeId);
+          if (!src) return p;
+          const shift = (pt: Point): Point => [pt[0] + 16, pt[1] + 16];
+          const copy: ManualShape = {
+            ...src,
+            id: newShapeId(),
+            points: src.points.map(shift),
+            verts: src.verts?.map((v) => ({
+              p: shift(v.p),
+              handleOut: v.handleOut ? shift(v.handleOut) : undefined,
+            })),
+          };
+          setSelectedId(copy.id);
+          setSelectedVertIndex(null);
+          return insertLeafForShape({ ...p, shapes: [...p.shapes, copy] }, copy.id);
+        },
+        { label: "Duplicate" },
+      );
+    },
+    [project, updateActive],
+  );
+
+  const duplicateNode = useCallback(
+    (nodeId: string) => {
+      if (!project) return;
+      const sid = shapeIdForNode(project, nodeId);
+      if (sid) duplicateShapeById(sid);
+    },
+    [project, duplicateShapeById],
+  );
+
+  const recolorShape = useCallback(
+    (shapeId: string, category: Category) => {
+      updateActive(
+        (p) => ({
+          ...p,
+          shapes: p.shapes.map((s) =>
+            s.id === shapeId ? { ...s, category, fill: defaultFill(category) } : s,
+          ),
+        }),
+        { label: "Recolor" },
+      );
+    },
+    [updateActive],
+  );
+
+  const recolorNode = useCallback(
+    (nodeId: string, category: Category) => {
+      if (!project) return;
+      const sid = shapeIdForNode(project, nodeId);
+      if (sid) recolorShape(sid, category);
+    },
+    [project, recolorShape],
+  );
+
+  const reorderNode = useCallback(
+    (nodeId: string, dir: "front" | "back") => {
+      updateActive((p) => reorderNodeInParent(p, nodeId, dir), {
+        label: dir === "front" ? "Bring to front" : "Send to back",
+      });
+    },
+    [updateActive],
+  );
+
+  const reorderCanvasId = useCallback(
+    (id: string, dir: "front" | "back") => {
+      const nid = nodeIdFromAny(id);
+      if (nid) reorderNode(nid, dir);
+    },
+    [nodeIdFromAny, reorderNode],
+  );
+
+  const renameAny = useCallback(
+    (id: string) => {
+      const nid = nodeIdFromAny(id) ?? (project && findNode(getLayerTree(project), id) ? id : null);
+      if (nid) onRenameNode(nid);
+    },
+    [nodeIdFromAny, onRenameNode, project],
+  );
+
+  const fillBorderGroupById = useCallback(
+    (id: string, category: Category) => {
+      if (!project) return;
+      let newId: string | null = null;
+      updateActive(
+        (p) => {
+          let gid: string | null = null;
+          if (isBorderId(p, id)) {
+            const node = containerForBorder(p, id);
+            gid = node ? enclosingBorderGroup(p, node.id)?.id ?? null : null;
+          } else {
+            gid = enclosingBorderGroup(p, id)?.id ?? null;
+          }
+          if (!gid) return p;
+          const before = new Set(p.shapes.map((s) => s.id));
+          const next = fillBorderGroup(p, gid, category);
+          newId = next.shapes.find((s) => !before.has(s.id))?.id ?? null;
+          return next;
+        },
+        { label: "Fill border group" },
+      );
+      if (newId) {
+        setSelectedId(newId);
+        setSelectedVertIndex(null);
+      }
+    },
+    [project, updateActive],
+  );
+
+  const selectBorderGroupMembers = useCallback(
+    (id: string) => {
+      if (!project) return;
+      let groupId: string | null = null;
+      if (isBorderId(project, id)) {
+        const node = containerForBorder(project, id);
+        groupId = node ? enclosingBorderGroup(project, node.id)?.id ?? null : null;
+      } else {
+        groupId = enclosingBorderGroup(project, id)?.id ?? null;
+      }
+      if (!groupId) return;
+      const gid = groupId;
+      const members = borderGroupMemberNodeIds(project, gid);
+      setSelectedNodeIds([gid, ...members]);
+      const loc = findNode(getLayerTree(project), gid);
+      const firstBorder =
+        loc && loc.node.kind === "container"
+          ? loc.node.children.find((c) => c.kind === "container" && !!c.borderId)
+          : undefined;
+      if (firstBorder && firstBorder.kind === "container" && firstBorder.borderId) {
+        setSelectedId(firstBorder.borderId);
+        setSelectedVertIndex(null);
+      }
+      updateActive((p) => setActiveContainer(p, gid), { history: "skip" });
+    },
+    [project, updateActive],
+  );
+
+  const ungroupNode = useCallback(
+    (id: string) => {
+      if (!project) return;
+      const nid = nodeIdFromAny(id) ?? id;
+      const loc = findNode(getLayerTree(project), nid);
+      if (!loc || loc.node.kind !== "container") return;
+      if (!confirm("Ungroup? Contents stay, the group is removed.")) return;
+      updateActive((p) => deleteContainers(p, [nid]), { label: "Ungroup" });
+      setSelectedNodeIds([]);
+    },
+    [project, nodeIdFromAny, updateActive],
+  );
+
+  const deleteAny = useCallback(
+    (id: string) => {
+      if (!project) return;
+      if (id === SHELL_ID) {
+        if (!confirm("Delete shell? Units will no longer be clipped.")) return;
+        updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
+        setSelectedId(null);
+        setSelectedVertIndex(null);
+        return;
+      }
+      const loc = findNode(getLayerTree(project), id);
+      if (loc) {
+        if (loc.node.kind === "leaf") {
+          if (!confirm("Delete this shape?")) return;
+          const sid = loc.node.shapeId;
+          updateActive(
+            (p) =>
+              removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== sid) }, sid),
+            { label: "Delete shape" },
+          );
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (loc.node.kind === "container" && loc.node.borderId) {
+          const borderId = loc.node.borderId;
+          if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+          updateActive((p) => removeBorder(p, borderId), { label: "Delete border" });
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (!confirm("Delete this group and everything inside?")) return;
+        updateActive((p) => deleteNodeDeep(p, id), { label: "Delete group" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (isBorderId(project, id)) {
+        if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+        updateActive((p) => removeBorder(p, id), { label: "Delete border" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (!project.shapes.some((s) => s.id === id)) return;
+      if (!confirm("Delete this shape?")) return;
+      updateActive(
+        (p) => removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== id) }, id),
+        { label: "Delete shape" },
+      );
+      setSelectedId(null);
+      setSelectedNodeIds([]);
+      setSelectedVertIndex(null);
+    },
+    [project, updateActive],
   );
 
   // ---- export ----
@@ -1176,20 +1403,6 @@ export default function ManualPage() {
   );
   const shellSelected = selectedId === SHELL_ID;
   const selectedBorder = project && selectedId ? borderById(project, selectedId) : null;
-  const activeIsBorderGroup = useMemo(() => {
-    if (!project || !activeContainerId) return false;
-    const f = findNode(getLayerTree(project), activeContainerId);
-    return !!f && isBorderGroup(f.node);
-  }, [project, activeContainerId]);
-  const canFillBorders = useMemo(() => {
-    if (!project) return false;
-    if (activeIsBorderGroup) return true;
-    if (selectedNodeIds.length === 1) {
-      const f = findNode(getLayerTree(project), selectedNodeIds[0]);
-      if (f && isBorderGroup(f.node)) return true;
-    }
-    return selectionIsAllBorders(project, selectedNodeIds);
-  }, [project, activeIsBorderGroup, selectedNodeIds]);
   const hasImage = !!project?.bg.dataUrl;
   const shellPts = project?.shell && project.shell.length >= 3 ? project.shell : null;
   const borderList = project ? getBorders(project) : [];
@@ -1567,14 +1780,12 @@ export default function ManualPage() {
             );
           })()}
 
-          {(tool === "border" || selectedBorder || canFillBorders) && (
+          {(tool === "border" || selectedBorder) && (
               <Section title="Border">
                 <p className="mb-2 text-xs text-neutral-600">
                   {selectedBorder
-                    ? "Clip region of the selected border. New shapes go inside the active border."
-                    : canFillBorders
-                      ? "Group 2+ borders, then Fill or draw into the group. Both regions share one fill."
-                      : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points)."}
+                    ? "Clip region of the selected border. New shapes go inside. To fill several regions as one, group the borders then right-click → Fill."
+                    : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points). Group 2+ borders, then right-click the group to Fill."}
                 </p>
                 <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
                   Color
@@ -1617,15 +1828,6 @@ export default function ManualPage() {
                     </button>
                   ))}
                 </div>
-                {canFillBorders && (
-                  <button
-                    type="button"
-                    className="mb-2 w-full rounded bg-brand px-2 py-1.5 text-xs font-medium text-white hover:bg-brand-hover"
-                    onClick={doFillBorders}
-                  >
-                    Fill with {CATEGORY_LABEL[drawCat]}
-                  </button>
-                )}
                 {selectedBorder && (
                   <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
                     <input
@@ -2025,14 +2227,18 @@ export default function ManualPage() {
               {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "border" &&
-                "Trace clip region · Group 2+ borders then Fill · Enter finish (3+ pts) · Space = pan"}
+                "Trace clip region · Group 2+ borders, then right-click → Fill · Enter finish (3+ pts) · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&
-                "Alt-drag from selected point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}
+                "Right-click for menu · Alt-drag from point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point"}
             </span>
           </div>
 
-          <div ref={editorHostRef} className="relative min-h-0 flex-1 touch-none overflow-hidden">
+          <div
+            ref={editorHostRef}
+            className="relative min-h-0 flex-1 touch-none overflow-hidden"
+            onContextMenu={(e) => e.preventDefault()}
+          >
             {project && (hasImage || project.shapes.length > 0 || project.shell || getBorders(project).length > 0) ? (
               <div className="absolute inset-0">
                 <ManualCanvas
@@ -2056,6 +2262,14 @@ export default function ManualPage() {
                   onDraftActive={(active) => {
                     draftActiveRef.current = active;
                   }}
+                  onDuplicateShape={duplicateShapeById}
+                  onDeleteNode={deleteAny}
+                  onRecolorShape={recolorShape}
+                  onReorder={reorderCanvasId}
+                  onRenameShape={renameAny}
+                  onFillBorderGroup={fillBorderGroupById}
+                  onSelectBorderGroupMembers={selectBorderGroupMembers}
+                  onUngroup={ungroupNode}
                 />
               </div>
             ) : (
@@ -2109,6 +2323,13 @@ export default function ManualPage() {
                         onSetActiveContainer={onSetActiveContainer}
                         onMoveNode={onMoveNodeCb}
                         onCollapseAll={onCollapseAll}
+                        onDuplicateNode={duplicateNode}
+                        onRecolorNode={recolorNode}
+                        onReorderNode={reorderNode}
+                        onFillBorderGroup={fillBorderGroupById}
+                        onSelectBorderGroupMembers={selectBorderGroupMembers}
+                        onDeleteNode={deleteAny}
+                        onUngroupNode={ungroupNode}
                       />
                     </div>
                   </div>
