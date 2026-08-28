@@ -10,10 +10,24 @@ import { CATEGORY_LABEL } from "@/lib/types";
 import { AEON_CONFIG } from "@/lib/presets";
 import { download, svgToPngBlob } from "@/lib/geometry";
 import {
+  canRedo,
+  canUndo,
+  COALESCE_MS,
+  emptyHistory,
+  peekRedoLabel,
+  peekUndoLabel,
+  pushHistory,
+  redoHistory,
+  undoHistory,
+  type TabHistory,
+} from "@/lib/history";
+import {
   CATEGORY_COLORS,
   DRAW_CATEGORIES,
   DEFAULT_STROKE,
   DEFAULT_SHELL_STROKE,
+  DEFAULT_LINE_STROKE,
+  DEFAULT_BORDER_STROKE,
   DEFAULT_EXPORT_TARGET_H,
   DEFAULT_EXPORT_TARGET_W,
   DEFAULT_PNG_SCALE,
@@ -26,6 +40,7 @@ import {
   activeProject,
   computeExportLayout,
   createContainer,
+  createBorder,
   defaultBadgeLayoutForCanvas,
   defaultFill,
   deleteContainers,
@@ -39,9 +54,21 @@ import {
   getExportTargetH,
   getExportTargetW,
   getLayerTree,
+  getLineDefaults,
+  getBorderDefaults,
+  getBorders,
+  borderById,
+  borderIdForNode,
+  borderVertsOf,
+  isBorderId,
+  containerForBorder,
+  updateBorderVerts as applyBorderVerts,
+  patchBorder,
+  deleteBorder as removeBorder,
   getPngScale,
   getShellStroke,
   getStroke,
+  isLineShape,
   groupNodes,
   insertLeafForShape,
   isManualProject,
@@ -95,7 +122,7 @@ function ToolIcon({ name }: { name: Tool }) {
           <path d="M4 4l7 16 2.5-6.5L20 11z" />
         </svg>
       );
-    case "outline":
+    case "shell":
       return (
         <svg {...common} aria-hidden>
           <path d="M4 8h16M4 16h16M8 4v16M16 4v16" opacity={0.35} />
@@ -118,6 +145,20 @@ function ToolIcon({ name }: { name: Tool }) {
       return (
         <svg {...common} aria-hidden>
           <path d="M12 3l8 6.5-3 9.5H7L4 9.5z" />
+        </svg>
+      );
+    case "line":
+      return (
+        <svg {...common} aria-hidden>
+          <path d="M4 18l5-8 4 5 7-11" />
+          <path d="M4 18l5-8" strokeDasharray="2 2" />
+        </svg>
+      );
+    case "border":
+      return (
+        <svg {...common} aria-hidden>
+          <rect x="4" y="4" width="16" height="16" rx="1" />
+          <rect x="7" y="7" width="10" height="10" rx="1" strokeDasharray="3 2" />
         </svg>
       );
     case "badge":
@@ -174,28 +215,106 @@ export default function ManualPage() {
   const importSvgRef = useRef<HTMLInputElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorHostRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<ManualWorkspace | null>(null);
+  const historyRef = useRef<Map<string, TabHistory>>(new Map());
+  const draftActiveRef = useRef(false);
+  const [historyTick, setHistoryTick] = useState(0);
 
   const project = useMemo(() => activeProject(workspace), [workspace]);
+  workspaceRef.current = workspace;
   const activeTabTitle = useMemo(() => {
     if (!workspace) return "";
     return workspace.tabs.find((t) => t.id === workspace.activeTabId)?.title ?? "";
   }, [workspace]);
 
-  const updateActive = useCallback((fn: (p: ManualProject) => ManualProject) => {
-    setWorkspace((ws) => {
-      if (!ws) return ws;
-      return {
-        ...ws,
-        tabs: ws.tabs.map((t) => {
-          if (t.id !== ws.activeTabId) return t;
-          const next = fn(t.project);
-          const title =
-            t.title === t.project.floor || t.title === next.floor ? next.floor : t.title;
-          return { ...t, project: next, title };
-        }),
-      };
+  const updateActive = useCallback(
+    (
+      fn: (p: ManualProject) => ManualProject,
+      opts?: { label?: string; history?: "push" | "coalesce" | "skip" },
+    ) => {
+      const ws = workspaceRef.current;
+      if (!ws) return;
+      const mode = opts?.history ?? "push";
+      const label = opts?.label ?? "Edit";
+      let changed = false;
+      const tabs = ws.tabs.map((t) => {
+        if (t.id !== ws.activeTabId) return t;
+        const next = fn(t.project);
+        if (next === t.project) return t;
+        changed = true;
+        if (mode !== "skip") {
+          const cur = historyRef.current.get(t.id) ?? emptyHistory();
+          historyRef.current.set(
+            t.id,
+            pushHistory(cur, t.project, label, mode === "coalesce" ? COALESCE_MS : 0),
+          );
+        }
+        const title = t.title === t.project.floor || t.title === next.floor ? next.floor : t.title;
+        return { ...t, project: next, title };
+      });
+      if (!changed) return;
+      if (mode !== "skip") setHistoryTick((n) => n + 1);
+      const nextWs = { ...ws, tabs };
+      workspaceRef.current = nextWs;
+      setWorkspace(nextWs);
+    },
+    [],
+  );
+
+  const pruneSelection = useCallback((p: ManualProject) => {
+    setSelectedVertIndex(null);
+    setSelectedId((id) => {
+      if (!id) return id;
+      if (id === SHELL_ID) return p.shell && p.shell.length >= 3 ? SHELL_ID : null;
+      if (isBorderId(p, id)) return id;
+      return p.shapes.some((s) => s.id === id) ? id : null;
     });
+    setSelectedNodeIds((ids) => ids.filter((nid) => !!findNode(getLayerTree(p), nid)));
   }, []);
+
+  const undo = useCallback(() => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const tab = ws.tabs.find((t) => t.id === ws.activeTabId);
+    if (!tab) return;
+    const result = undoHistory(historyRef.current.get(tab.id) ?? emptyHistory(), tab.project);
+    if (!result) return;
+    historyRef.current.set(tab.id, result.history);
+    setHistoryTick((n) => n + 1);
+    const title =
+      tab.title === tab.project.floor || tab.title === result.project.floor
+        ? result.project.floor
+        : tab.title;
+    const nextWs = {
+      ...ws,
+      tabs: ws.tabs.map((t) => (t.id === tab.id ? { ...t, project: result.project, title } : t)),
+    };
+    workspaceRef.current = nextWs;
+    setWorkspace(nextWs);
+    pruneSelection(result.project);
+  }, [pruneSelection]);
+
+  const redo = useCallback(() => {
+    const ws = workspaceRef.current;
+    if (!ws) return;
+    const tab = ws.tabs.find((t) => t.id === ws.activeTabId);
+    if (!tab) return;
+    const result = redoHistory(historyRef.current.get(tab.id) ?? emptyHistory(), tab.project);
+    if (!result) return;
+    historyRef.current.set(tab.id, result.history);
+    setHistoryTick((n) => n + 1);
+    const title =
+      tab.title === tab.project.floor || tab.title === result.project.floor
+        ? result.project.floor
+        : tab.title;
+    const nextWs = {
+      ...ws,
+      tabs: ws.tabs.map((t) => (t.id === tab.id ? { ...t, project: result.project, title } : t)),
+    };
+    workspaceRef.current = nextWs;
+    setWorkspace(nextWs);
+    pruneSelection(result.project);
+  }, [pruneSelection]);
 
   // restore workspace on mount (or start with one empty tab)
   useEffect(() => {
@@ -219,6 +338,38 @@ export default function ManualPage() {
       if (saveTimer.current) clearTimeout(saveTimer.current);
     };
   }, [workspace]);
+
+  // Pinch-to-zoom over the editor must not scale the page chrome. Safari fires
+  // gesture* on the document; Chrome uses ctrl+wheel. Capture on the editor host.
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!host) return;
+    const overHost = (e: Event) => {
+      if (e.target instanceof Node && host.contains(e.target)) return true;
+      const g = e as Event & { clientX?: number; clientY?: number };
+      if (typeof g.clientX === "number" && typeof g.clientY === "number") {
+        const top = document.elementFromPoint(g.clientX, g.clientY);
+        if (top && host.contains(top)) return true;
+      }
+      return host.matches(":hover");
+    };
+    const blockPageZoom = (e: Event) => {
+      if (overHost(e)) e.preventDefault();
+    };
+    const onWheel = (e: WheelEvent) => {
+      if ((e.ctrlKey || e.metaKey) && host.contains(e.target as Node)) e.preventDefault();
+    };
+    host.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("gesturestart", blockPageZoom, { passive: false, capture: true });
+    document.addEventListener("gesturechange", blockPageZoom, { passive: false, capture: true });
+    document.addEventListener("gestureend", blockPageZoom, { passive: false, capture: true });
+    return () => {
+      host.removeEventListener("wheel", onWheel);
+      document.removeEventListener("gesturestart", blockPageZoom, true);
+      document.removeEventListener("gesturechange", blockPageZoom, true);
+      document.removeEventListener("gestureend", blockPageZoom, true);
+    };
+  }, []);
 
   const resetTabLocalUi = useCallback(() => {
     setSelectedId(null);
@@ -260,6 +411,7 @@ export default function ManualPage() {
         if (tab.project.shapes.length > 0 || tab.project.shell) {
           if (!confirm(`Close tab “${tab.title}”? Unsaved export will be lost from this tab.`)) return ws;
         }
+        historyRef.current.delete(id);
         if (ws.tabs.length <= 1) {
           const fresh = makeTab(newProject(tab.project.floor || "1F"));
           return { ...ws, tabs: [fresh], activeTabId: fresh.id };
@@ -295,7 +447,7 @@ export default function ManualPage() {
       setWorkspace(newWorkspace(floor));
       return;
     }
-    updateActive((p) => ({ ...p, floor }));
+    updateActive((p) => ({ ...p, floor }), { label: "Rename floor" });
   };
 
   const onFile = useCallback(async (f: File) => {
@@ -303,48 +455,54 @@ export default function ManualPage() {
     setError(null);
     try {
       const bg = await readImage(f);
-      setWorkspace((ws) => {
-        if (!ws) {
-          const p = { ...newProject("1F"), bg: { ...bg, opacity: 0.4 } };
-          const tab = makeTab(p);
-          return { version: 2, tabs: [tab], activeTabId: tab.id, updatedAt: Date.now() };
-        }
-        return {
-          ...ws,
-          tabs: ws.tabs.map((t) =>
-            t.id === ws.activeTabId
-              ? {
-                  ...t,
-                  project: {
-                    ...t.project,
-                    bg: { ...bg, opacity: t.project.bg.opacity || 0.4 },
-                  },
-                }
-              : t,
-          ),
-        };
-      });
+      if (!workspaceRef.current) {
+        const p = { ...newProject("1F"), bg: { ...bg, opacity: 0.4 } };
+        const tab = makeTab(p);
+        const ws = { version: 2 as const, tabs: [tab], activeTabId: tab.id, updatedAt: Date.now() };
+        workspaceRef.current = ws;
+        setWorkspace(ws);
+        return;
+      }
+      updateActive(
+        (p) => ({ ...p, bg: { ...bg, opacity: p.bg.opacity || 0.4 } }),
+        { label: "Background" },
+      );
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+  }, [updateActive]);
 
   // ---- shape ops ----
   const makeShape = useCallback(
-    (kind: ShapeKind, points: Point[], verts?: PolyVert[]): ManualShape => ({
-      id: newShapeId(),
-      kind,
-      points,
-      verts,
-      category: drawCat,
-      fill: defaultFill(drawCat),
-    }),
-    [drawCat],
+    (kind: ShapeKind, points: Point[], verts?: PolyVert[]): ManualShape => {
+      const base: ManualShape = {
+        id: newShapeId(),
+        kind,
+        points,
+        verts,
+        category: drawCat,
+        fill: defaultFill(drawCat),
+      };
+      if (kind === "line") {
+        const d = getLineDefaults(project);
+        return {
+          ...base,
+          category: "specialty",
+          fill: "none",
+          stroke: { color: d.color, width: d.width },
+          dash: d.dash,
+        };
+      }
+      return base;
+    },
+    [drawCat, project],
   );
 
   const addShape = useCallback(
     (s: ManualShape) => {
-      updateActive((p) => insertLeafForShape({ ...p, shapes: [...p.shapes, s] }, s.id));
+      updateActive((p) => insertLeafForShape({ ...p, shapes: [...p.shapes, s] }, s.id), {
+        label: "Add shape",
+      });
       setSelectedId(s.id);
       setSelectedVertIndex(null);
       setTool("select");
@@ -355,22 +513,28 @@ export default function ManualPage() {
   const updateShapeVerts = useCallback(
     (id: string, verts: PolyVert[]) => {
       const synced = syncShapeFromVerts(verts);
-      updateActive((p) => ({
-        ...p,
-        shapes: p.shapes.map((s) =>
-          s.id === id ? { ...s, verts: synced.verts, points: synced.points } : s,
-        ),
-      }));
+      updateActive(
+        (p) => ({
+          ...p,
+          shapes: p.shapes.map((s) =>
+            s.id === id ? { ...s, verts: synced.verts, points: synced.points } : s,
+          ),
+        }),
+        { label: "Edit shape" },
+      );
     },
     [updateActive],
   );
 
   const patchShape = useCallback(
     (id: string, patch: Partial<ManualShape>) => {
-      updateActive((p) => ({
-        ...p,
-        shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
-      }));
+      updateActive(
+        (p) => ({
+          ...p,
+          shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+        }),
+        { label: "Edit shape", history: "coalesce" },
+      );
     },
     [updateActive],
   );
@@ -380,8 +544,13 @@ export default function ManualPage() {
       setSelectedId(id);
       setSelectedVertIndex(null);
       if (id && id !== SHELL_ID && project) {
-        const nid = nodeIdForShape(project, id);
-        setSelectedNodeIds(nid ? [nid] : []);
+        if (isBorderId(project, id)) {
+          const node = containerForBorder(project, id);
+          setSelectedNodeIds(node ? [node.id] : []);
+        } else {
+          const nid = nodeIdForShape(project, id);
+          setSelectedNodeIds(nid ? [nid] : []);
+        }
       } else {
         setSelectedNodeIds([]);
       }
@@ -394,19 +563,27 @@ export default function ManualPage() {
     const verts =
       selectedId === SHELL_ID
         ? shellVertsOf(project)
-        : (() => {
-            const s = project.shapes.find((x) => x.id === selectedId);
-            return s ? shapeVerts(s) : null;
-          })();
+        : isBorderId(project, selectedId)
+          ? (() => {
+              const b = borderById(project, selectedId);
+              return b ? borderVertsOf(b) : null;
+            })()
+          : (() => {
+              const s = project.shapes.find((x) => x.id === selectedId);
+              return s ? shapeVerts(s) : null;
+            })();
     if (!verts) return;
-    const next = removeVert(verts, selectedVertIndex);
+    const line = selectedId !== SHELL_ID && project.shapes.find((x) => x.id === selectedId)?.kind === "line";
+    const next = removeVert(verts, selectedVertIndex, line ? 2 : 3);
     if (!next) {
-      window.alert("Need at least 3 points");
+      window.alert(line ? "Need at least 2 points" : "Need at least 3 points");
       return;
     }
     if (selectedId === SHELL_ID) {
       const points = syncShapeFromVerts(next).points;
-      updateActive((p) => ({ ...p, shell: points, shellVerts: next }));
+      updateActive((p) => ({ ...p, shell: points, shellVerts: next }), { label: "Delete point" });
+    } else if (isBorderId(project, selectedId)) {
+      updateActive((p) => applyBorderVerts(p, selectedId, next), { label: "Delete point" });
     } else {
       updateShapeVerts(selectedId, next);
     }
@@ -416,33 +593,74 @@ export default function ManualPage() {
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
     if (selectedId === SHELL_ID) {
-      if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
-      updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
+      if (!confirm("Delete shell? Units will no longer be clipped.")) return;
+      updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
       setSelectedId(null);
       setSelectedVertIndex(null);
       return;
     }
+    if (project && isBorderId(project, selectedId)) {
+      if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+      updateActive((p) => removeBorder(p, selectedId), { label: "Delete border" });
+      setSelectedId(null);
+      setSelectedNodeIds([]);
+      setSelectedVertIndex(null);
+      return;
+    }
     if (!confirm("Delete this shape?")) return;
-    updateActive((p) =>
-      removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }, selectedId),
+    updateActive(
+      (p) =>
+        removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }, selectedId),
+      { label: "Delete shape" },
     );
     setSelectedId(null);
     setSelectedNodeIds([]);
     setSelectedVertIndex(null);
-  }, [selectedId, updateActive]);
+  }, [project, selectedId, updateActive]);
 
   const setShell = useCallback(
     (verts: PolyVert[]) => {
       const points = syncShapeFromVerts(verts).points;
-      updateActive((p) => ({ ...p, shell: points, shellVerts: verts }));
+      updateActive((p) => ({ ...p, shell: points, shellVerts: verts }), { label: "Set shell" });
       setTool("select");
     },
     [updateActive],
   );
 
+  const addBorder = useCallback(
+    (verts: PolyVert[]) => {
+      let newId: string | null = null;
+      let nodeId: string | null = null;
+      updateActive(
+        (p) => {
+          const next = createBorder(p, verts, getLayerTree(p).activeContainerId);
+          const prev = new Set(getBorders(p).map((b) => b.id));
+          newId = getBorders(next).find((b) => !prev.has(b.id))?.id ?? null;
+          if (newId) nodeId = containerForBorder(next, newId)?.id ?? null;
+          return next;
+        },
+        { label: "Add border" },
+      );
+      if (newId) {
+        setSelectedId(newId);
+        setSelectedVertIndex(null);
+        setSelectedNodeIds(nodeId ? [nodeId] : []);
+      }
+      setTool("select");
+    },
+    [updateActive],
+  );
+
+  const updateBorderGeometry = useCallback(
+    (id: string, verts: PolyVert[]) => {
+      updateActive((p) => applyBorderVerts(p, id, verts), { label: "Edit border" });
+    },
+    [updateActive],
+  );
+
   const clearShell = useCallback(() => {
-    if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
-    updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
+    if (!confirm("Clear shell? Units will no longer be clipped.")) return;
+    updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Clear shell" });
     if (selectedId === SHELL_ID) {
       setSelectedId(null);
       setSelectedVertIndex(null);
@@ -450,7 +668,7 @@ export default function ManualPage() {
   }, [selectedId, updateActive]);
 
   const duplicateSelected = useCallback(() => {
-    if (!selectedId || selectedId === SHELL_ID) return;
+    if (!selectedId || selectedId === SHELL_ID || (project && isBorderId(project, selectedId))) return;
     updateActive((p) => {
       const src = p.shapes.find((s) => s.id === selectedId);
       if (!src) return p;
@@ -466,22 +684,59 @@ export default function ManualPage() {
       };
       setSelectedId(copy.id);
       setSelectedVertIndex(null);
-      return { ...p, shapes: [...p.shapes, copy] };
-    });
-  }, [selectedId, updateActive]);
+      return insertLeafForShape({ ...p, shapes: [...p.shapes, copy] }, copy.id);
+    }, { label: "Duplicate" });
+  }, [project, selectedId, updateActive]);
 
-  const setOpacity = (v: number) => updateActive((p) => ({ ...p, bg: { ...p.bg, opacity: v } }));
-  const setDrawOpacity = (v: number) => updateActive((p) => ({ ...p, drawOpacity: v }));
+  const setOpacity = (v: number) =>
+    updateActive((p) => ({ ...p, bg: { ...p.bg, opacity: v } }), {
+      label: "Underlay",
+      history: "coalesce",
+    });
+  const setDrawOpacity = (v: number) =>
+    updateActive((p) => ({ ...p, drawOpacity: v }), { label: "Draw opacity", history: "coalesce" });
   const stroke = getStroke(project);
   const setStrokeColor = (color: string) =>
-    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), color } }));
+    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), color } }), {
+      label: "Stroke color",
+      history: "coalesce",
+    });
   const setStrokeWidth = (width: number) =>
-    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }));
+    updateActive((p) => ({ ...p, stroke: { ...getStroke(p), width } }), {
+      label: "Stroke width",
+      history: "coalesce",
+    });
   const shellStroke = getShellStroke(project);
   const setShellStrokeColor = (color: string) =>
-    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), color } }));
+    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), color } }), {
+      label: "Shell color",
+      history: "coalesce",
+    });
   const setShellStrokeWidth = (width: number) =>
-    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), width } }));
+    updateActive((p) => ({ ...p, shellStroke: { ...getShellStroke(p), width } }), {
+      label: "Shell width",
+      history: "coalesce",
+    });
+  const lineDefaults = getLineDefaults(project);
+  const setLineDefault = (patch: Partial<ReturnType<typeof getLineDefaults>>) =>
+    updateActive(
+      (p) => ({ ...p, lineDefaults: { ...getLineDefaults(p), ...patch } }),
+      { label: "Line style", history: "coalesce" },
+    );
+  const patchLineShape = (id: string, patch: Pick<ManualShape, "stroke" | "dash">) =>
+    updateActive(
+      (p) => ({
+        ...p,
+        shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+      }),
+      { label: "Edit line", history: "coalesce" },
+    );
+  const borderDefaults = getBorderDefaults(project);
+  const setBorderDefault = (patch: Partial<ReturnType<typeof getBorderDefaults>>) =>
+    updateActive(
+      (p) => ({ ...p, borderDefaults: { ...getBorderDefaults(p), ...patch } }),
+      { label: "Border style", history: "coalesce" },
+    );
 
   // ---- layers (recursive node tree) ----
   const activeContainerId = useMemo(
@@ -497,9 +752,17 @@ export default function ManualPage() {
     (id: string, e: React.MouseEvent) => {
       if (!project) return;
       const syncCanvas = (nodeId: string | null) => {
-        const sid = nodeId ? shapeIdForNode(project, nodeId) : null;
-        setSelectedId(sid);
         setSelectedVertIndex(null);
+        if (!nodeId) {
+          setSelectedId(null);
+          return;
+        }
+        const bid = borderIdForNode(project, nodeId);
+        if (bid) {
+          setSelectedId(bid);
+          return;
+        }
+        setSelectedId(shapeIdForNode(project, nodeId));
       };
       if (e.metaKey || e.ctrlKey) {
         setSelectedNodeIds((prev) =>
@@ -527,10 +790,10 @@ export default function ManualPage() {
   );
 
   const doNewContainer = () =>
-    updateActive((p) => createContainer(p, activeContainerId ?? null));
+    updateActive((p) => createContainer(p, activeContainerId ?? null), { label: "New group" });
   const doGroup = () => {
     if (!project || selectedNodeIds.length < 1) return;
-    updateActive((p) => groupNodes(p, selectedNodeIds));
+    updateActive((p) => groupNodes(p, selectedNodeIds), { label: "Group" });
     setSelectedNodeIds([]);
   };
   const doDeleteNodes = () => {
@@ -541,43 +804,52 @@ export default function ManualPage() {
     });
     if (!containers.length) return;
     if (!confirm("Ungroup selected group(s)? Their contents stay, the group is removed.")) return;
-    updateActive((p) => deleteContainers(p, containers));
+    updateActive((p) => deleteContainers(p, containers), { label: "Ungroup" });
     setSelectedNodeIds([]);
   };
 
   const onMoveNodeCb = useCallback(
     (id: string, parentId: string | null, indexModel: number) => {
-      updateActive((p) => moveNode(p, id, parentId, indexModel));
+      updateActive((p) => moveNode(p, id, parentId, indexModel), { label: "Move layer" });
     },
     [updateActive],
   );
   const onToggleNodeVisible = useCallback(
     (id: string) => {
-      updateActive((p) => {
-        const f = findNode(getLayerTree(p), id);
-        if (!f) return p;
-        return patchNode(p, id, { visible: !f.node.visible });
-      });
+      updateActive(
+        (p) => {
+          const f = findNode(getLayerTree(p), id);
+          if (!f) return p;
+          return patchNode(p, id, { visible: !f.node.visible });
+        },
+        { label: "Toggle visibility" },
+      );
     },
     [updateActive],
   );
   const onToggleNodeLocked = useCallback(
     (id: string) => {
-      updateActive((p) => {
-        const f = findNode(getLayerTree(p), id);
-        if (!f) return p;
-        return patchNode(p, id, { locked: !f.node.locked });
-      });
+      updateActive(
+        (p) => {
+          const f = findNode(getLayerTree(p), id);
+          if (!f) return p;
+          return patchNode(p, id, { locked: !f.node.locked });
+        },
+        { label: "Toggle lock" },
+      );
     },
     [updateActive],
   );
   const onToggleNodeCollapsed = useCallback(
     (id: string) => {
-      updateActive((p) => {
-        const f = findNode(getLayerTree(p), id);
-        if (!f || f.node.kind !== "container") return p;
-        return patchNode(p, id, { collapsed: !f.node.collapsed });
-      });
+      updateActive(
+        (p) => {
+          const f = findNode(getLayerTree(p), id);
+          if (!f || f.node.kind !== "container") return p;
+          return patchNode(p, id, { collapsed: !f.node.collapsed });
+        },
+        { label: "Collapse" },
+      );
     },
     [updateActive],
   );
@@ -588,17 +860,22 @@ export default function ManualPage() {
       if (!f) return;
       const current = f.node.kind === "container" ? f.node.name : f.node.name ?? "";
       const name = window.prompt("Name", current);
-      if (name != null && name.trim()) updateActive((p) => patchNode(p, id, { name: name.trim() }));
+      if (name != null && name.trim()) {
+        updateActive((p) => patchNode(p, id, { name: name.trim() }), { label: "Rename" });
+      }
     },
     [project, updateActive],
   );
   const onSetActiveContainer = useCallback(
-    (id: string | null) => updateActive((p) => setActiveContainer(p, id)),
+    (id: string | null) =>
+      updateActive((p) => setActiveContainer(p, id), { history: "skip" }),
     [updateActive],
   );
   const onCollapseAll = useCallback(
     (collapsed: boolean) => {
-      updateActive((p) => setAllCollapsed(p, collapsed));
+      updateActive((p) => setAllCollapsed(p, collapsed), {
+        label: collapsed ? "Collapse all" : "Expand all",
+      });
     },
     [updateActive],
   );
@@ -635,59 +912,80 @@ export default function ManualPage() {
   };
 
   const setExportWidth = (n: number) => {
-    updateActive((p) => ({
-      ...p,
-      exportNormalizedWidth: Math.max(EXPORT_WIDTH_MIN, Math.min(EXPORT_WIDTH_MAX, Math.round(n))),
-    }));
+    updateActive(
+      (p) => ({
+        ...p,
+        exportNormalizedWidth: Math.max(EXPORT_WIDTH_MIN, Math.min(EXPORT_WIDTH_MAX, Math.round(n))),
+      }),
+      { label: "Export width", history: "coalesce" },
+    );
   };
 
   const setExportMode = (mode: "width" | "contain" | "stretch") => {
-    updateActive((p) => ({ ...p, exportMode: mode }));
+    updateActive((p) => ({ ...p, exportMode: mode }), { label: "Export mode" });
   };
 
   const setExportTargetW = (n: number) => {
-    updateActive((p) => ({
-      ...p,
-      exportTargetW: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
-    }));
+    updateActive(
+      (p) => ({
+        ...p,
+        exportTargetW: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
+      }),
+      { label: "Export width", history: "coalesce" },
+    );
   };
 
   const setExportTargetH = (n: number) => {
-    updateActive((p) => ({
-      ...p,
-      exportTargetH: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
-    }));
+    updateActive(
+      (p) => ({
+        ...p,
+        exportTargetH: Math.max(EXPORT_DIM_MIN, Math.min(EXPORT_DIM_MAX, Math.round(n))),
+      }),
+      { label: "Export height", history: "coalesce" },
+    );
   };
 
   const setPngScale = (n: number) => {
-    updateActive((p) => ({
-      ...p,
-      pngScale: Math.max(PNG_SCALE_MIN, Math.min(PNG_SCALE_MAX, Math.round(n))),
-    }));
+    updateActive(
+      (p) => ({
+        ...p,
+        pngScale: Math.max(PNG_SCALE_MIN, Math.min(PNG_SCALE_MAX, Math.round(n))),
+      }),
+      { label: "PNG scale" },
+    );
   };
 
   const updateBadgeLayout = useCallback(
     (layout: ManualBadgeLayout) => {
-      updateActive((p) => ({ ...p, badgeLayout: layout }));
+      updateActive((p) => ({ ...p, badgeLayout: layout }), {
+        label: "Move badge",
+        history: "coalesce",
+      });
     },
     [updateActive],
   );
 
   const resetBadgeLayout = () => {
-    updateActive((p) => {
-      const layout = computeExportLayout(p);
-      return {
-        ...p,
-        badgeLayout: defaultBadgeLayoutForCanvas(layout.mode, layout.width, layout.planWidth, layout.gutter),
-      };
-    });
+    updateActive(
+      (p) => {
+        const layout = computeExportLayout(p);
+        return {
+          ...p,
+          badgeLayout: defaultBadgeLayoutForCanvas(layout.mode, layout.width, layout.planWidth, layout.gutter),
+        };
+      },
+      { label: "Reset badge" },
+    );
   };
 
   const patchBadgeField = (key: keyof ManualBadgeLayout, value: number) => {
-    updateActive((p) => {
-      const cur = getBadgeLayout(p);
-      return { ...p, badgeLayout: { ...cur, [key]: value } };
-    });
+    updateActive(
+      (p) => {
+        const cur = getBadgeLayout(p);
+        return { ...p, badgeLayout: { ...cur, [key]: value } };
+      },
+      { label: "Edit badge", history: "coalesce" },
+    );
   };
 
   // ---- project / workspace file ----
@@ -779,7 +1077,7 @@ export default function ManualPage() {
 
   const doNew = () => {
     if (!confirm("Reset the active tab to a blank project? Other tabs are kept.")) return;
-    updateActive(() => newProject(project?.floor ?? "1F"));
+    updateActive(() => newProject(project?.floor ?? "1F"), { label: "New project" });
     setSelectedId(null);
     setSelectedVertIndex(null);
     setFile(null);
@@ -791,6 +1089,18 @@ export default function ManualPage() {
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.metaKey || e.ctrlKey) {
+        if (e.key.toLowerCase() === "z") {
+          e.preventDefault();
+          if (draftActiveRef.current) return;
+          if (e.shiftKey) redo();
+          else undo();
+          return;
+        }
+        if (e.key.toLowerCase() === "y") {
+          e.preventDefault();
+          redo();
+          return;
+        }
         if (e.key.toLowerCase() === "d") {
           e.preventDefault();
           duplicateSelected();
@@ -801,27 +1111,35 @@ export default function ManualPage() {
       else if (e.key === "r" || e.key === "R") setTool("rect");
       else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
-      else if (e.key === "o" || e.key === "O") setTool("outline");
-      else if (e.key === "b" || e.key === "B") setTool("badge");
+      else if (e.key === "l" || e.key === "L") setTool("line");
+      else if (e.key === "b" || e.key === "B") setTool("border");
+      else if (e.key === "o" || e.key === "O" || e.key === "s" || e.key === "S") setTool("shell");
+      else if (e.key === "f" || e.key === "F") setTool("badge");
       else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         if (selectedVertIndex != null) deleteVert();
         else deleteSelected();
       } else if (e.key === "[") {
-        updateActive((p) => ({
-          ...p,
-          bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) },
-        }));
+        updateActive(
+          (p) => ({
+            ...p,
+            bg: { ...p.bg, opacity: Math.max(0.05, p.bg.opacity - 0.1) },
+          }),
+          { label: "Underlay", history: "coalesce" },
+        );
       } else if (e.key === "]") {
-        updateActive((p) => ({
-          ...p,
-          bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) },
-        }));
+        updateActive(
+          (p) => ({
+            ...p,
+            bg: { ...p.bg, opacity: Math.min(1, p.bg.opacity + 0.1) },
+          }),
+          { label: "Underlay", history: "coalesce" },
+        );
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [deleteSelected, deleteVert, duplicateSelected, selectedVertIndex, updateActive]);
+  }, [deleteSelected, deleteVert, duplicateSelected, selectedVertIndex, updateActive, undo, redo]);
 
   const selShape = useMemo(
     () =>
@@ -831,16 +1149,43 @@ export default function ManualPage() {
     [selectedId, project],
   );
   const shellSelected = selectedId === SHELL_ID;
+  const selectedBorder = project && selectedId ? borderById(project, selectedId) : null;
   const hasImage = !!project?.bg.dataUrl;
   const shellPts = project?.shell && project.shell.length >= 3 ? project.shell : null;
+  const borderList = project ? getBorders(project) : [];
+  const borderUiColor = selectedBorder ? selectedBorder.stroke.color : borderDefaults.color;
+  const borderUiWidth = selectedBorder ? selectedBorder.stroke.width : borderDefaults.width;
+  const borderUiDash = selectedBorder ? (selectedBorder.dash ?? "solid") : borderDefaults.dash;
+  const commitBorderAppearance = (
+    color: string,
+    width: number,
+    dash: "solid" | "dash",
+    clip?: boolean,
+  ) => {
+    if (selectedBorder) {
+      updateActive(
+        (p) =>
+          patchBorder(p, selectedBorder.id, {
+            stroke: { color, width },
+            dash,
+            ...(clip !== undefined ? { clip } : {}),
+          }),
+        { label: "Edit border", history: "coalesce" },
+      );
+    } else {
+      setBorderDefault({ color, width, dash });
+    }
+  };
 
   const TOOLS: { key: Tool; label: string; hint: string }[] = [
     { key: "select", label: "Select", hint: "V" },
-    { key: "outline", label: "Outline", hint: "O" },
+    { key: "shell", label: "Shell", hint: "O" },
     { key: "rect", label: "Rect", hint: "R" },
     { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
-    { key: "badge", label: "Badge", hint: "B" },
+    { key: "line", label: "Line", hint: "L" },
+    { key: "border", label: "Border", hint: "B" },
+    { key: "badge", label: "Badge", hint: "F" },
   ];
 
   return (
@@ -854,6 +1199,34 @@ export default function ManualPage() {
           <span className="text-xs text-neutral-400">
             {saved === "saving" ? "Saving…" : saved === "saved" ? "Autosaved" : ""}
           </span>
+          {(() => {
+            const hist = workspace ? historyRef.current.get(workspace.activeTabId) : undefined;
+            void historyTick;
+            const uLabel = peekUndoLabel(hist);
+            const rLabel = peekRedoLabel(hist);
+            return (
+              <div className="flex gap-1">
+                <button
+                  type="button"
+                  onClick={undo}
+                  disabled={!canUndo(hist)}
+                  title={uLabel ? `Undo ${uLabel} (⌘Z)` : "Undo (⌘Z)"}
+                  className="rounded bg-neutral-100 px-2 py-1 text-xs text-neutral-700 disabled:opacity-40"
+                >
+                  Undo
+                </button>
+                <button
+                  type="button"
+                  onClick={redo}
+                  disabled={!canRedo(hist)}
+                  title={rLabel ? `Redo ${rLabel} (⌘⇧Z)` : "Redo (⌘⇧Z)"}
+                  className="rounded bg-neutral-100 px-2 py-1 text-xs text-neutral-700 disabled:opacity-40"
+                >
+                  Redo
+                </button>
+              </div>
+            );
+          })()}
           {error && <span className="max-w-md truncate text-red-600" title={error}>{error}</span>}
           <Link href="/auto" className="rounded bg-neutral-800 px-3 py-1 text-white hover:bg-neutral-700">
             Auto mode
@@ -864,6 +1237,42 @@ export default function ManualPage() {
       <div className="flex min-h-0 flex-1">
         {/* LEFT — controls */}
         <aside className="w-80 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white">
+          <Section title="Project">
+            <div className="flex flex-wrap gap-2">
+              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New tab content</button>
+              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export tab
+              </button>
+              <button onClick={exportAllTabs} disabled={!workspace} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export all tabs
+              </button>
+              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import
+              </button>
+              <button onClick={() => importSvgRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import SVG
+              </button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
+              />
+              <input
+                ref={importSvgRef}
+                type="file"
+                accept="image/svg+xml,.svg"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importSvg(e.target.files[0])}
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-neutral-400">
+              Import accepts a single floor JSON or a full workspace (adds as new tabs).
+              Import SVG recovers a lost project from an exported SVG (no denah, kinds→poly).
+            </p>
+          </Section>
+
           <Section title="Input">
             <Uploader floor={project?.floor ?? "1F"} onFloor={setFloor} onFile={onFile} fileName={file?.name} />
           </Section>
@@ -887,21 +1296,25 @@ export default function ManualPage() {
                 </button>
               ))}
             </div>
-            <div className="mb-2 text-xs text-neutral-600">Draw as</div>
-            <div className="mb-3 flex flex-wrap gap-1">
-              {DRAW_CATEGORIES.map((c) => (
-                <button
-                  key={c}
-                  onClick={() => setDrawCat(c)}
-                  className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                    drawCat === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
-                  }`}
-                >
-                  <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
-                  {CATEGORY_LABEL[c]}
-                </button>
-              ))}
-            </div>
+            {tool !== "line" && tool !== "border" && (
+              <>
+                <div className="mb-2 text-xs text-neutral-600">Draw as</div>
+                <div className="mb-3 flex flex-wrap gap-1">
+                  {DRAW_CATEGORIES.map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => setDrawCat(c)}
+                      className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
+                        drawCat === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
+                      }`}
+                    >
+                      <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
+                      {CATEGORY_LABEL[c]}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
             <label className="flex items-center gap-2 text-xs text-neutral-700">
               <input type="checkbox" checked={snap} onChange={(e) => setSnap(e.target.checked)} className="accent-brand" />
               Snap
@@ -954,10 +1367,15 @@ export default function ManualPage() {
                 Reset to white / 2px
               </button>
             </div>
-            <div className="mt-3 border-t border-neutral-100 pt-3 text-xs text-neutral-600">
-              <div className="mb-1 font-medium text-neutral-600">Outer outline (shell)</div>
-              <div className="mb-2 text-neutral-500">
-                {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — use Outline tool"}
+          </Section>
+
+          {(tool === "shell" || shellSelected) && (
+            <Section title="Shell">
+              <p className="mb-2 text-xs text-neutral-600">
+                Outer floor-plate. Units outside this boundary are clipped.
+              </p>
+              <div className="mb-2 text-xs text-neutral-500">
+                {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — click on the canvas to trace"}
               </div>
               <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
                 Color
@@ -992,7 +1410,7 @@ export default function ManualPage() {
               >
                 Reset to white / 2px
               </button>
-              <div className="flex gap-2">
+              <div className="mb-2 flex gap-2">
                 {shellPts && (
                   <button
                     onClick={() => {
@@ -1012,15 +1430,7 @@ export default function ManualPage() {
                   Clear shell
                 </button>
               </div>
-            </div>
-          </Section>
-
-          {shellSelected && (
-            <Section title="Shell">
-              <p className="mb-2 text-xs text-neutral-600">
-                Outer floor-plate outline. Units outside this boundary are clipped.
-              </p>
-              {selectedVertIndex != null && (
+              {shellSelected && selectedVertIndex != null && (
                 <button
                   onClick={deleteVert}
                   className="mb-2 w-full rounded bg-neutral-800 px-2 py-1 text-xs text-white"
@@ -1028,38 +1438,242 @@ export default function ManualPage() {
                   Delete point ⌫
                 </button>
               )}
-              <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
-                Delete shell ⌫
-              </button>
+              {shellSelected && (
+                <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
+                  Delete shell ⌫
+                </button>
+              )}
             </Section>
+          )}
+
+          {(tool === "line" || (selShape && isLineShape(selShape))) && (() => {
+            const editing = !!(selShape && isLineShape(selShape));
+            const color = editing ? (selShape!.stroke?.color ?? lineDefaults.color) : lineDefaults.color;
+            const width = editing ? (selShape!.stroke?.width ?? lineDefaults.width) : lineDefaults.width;
+            const dash = editing ? (selShape!.dash ?? "solid") : lineDefaults.dash;
+            const apply = (patch: { color?: string; width?: number; dash?: "solid" | "dash" }) => {
+              const next = {
+                color: patch.color ?? color,
+                width: patch.width ?? width,
+                dash: patch.dash ?? dash,
+              };
+              if (editing && selShape) {
+                patchLineShape(selShape.id, {
+                  stroke: { color: next.color, width: next.width },
+                  dash: next.dash,
+                });
+              } else {
+                setLineDefault(next);
+              }
+            };
+            return (
+              <Section title="Line">
+                <p className="mb-2 text-xs text-neutral-600">
+                  {editing
+                    ? "Stroke of the selected line."
+                    : "Default for new lines. Click/drag on canvas · Enter to finish (2+ points)."}
+                </p>
+                <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                  Color
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => apply({ color: e.target.value })}
+                    className="h-6 w-10 rounded border border-neutral-300"
+                  />
+                </label>
+                <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                  Width
+                  <input
+                    type="range"
+                    min={1}
+                    max={24}
+                    step={1}
+                    value={width}
+                    onChange={(e) => apply({ width: Number(e.target.value) })}
+                    className="w-24 accent-brand"
+                  />
+                  <span className="w-6 font-mono">{width}</span>
+                  px
+                </label>
+                <div className="mb-2 flex gap-1">
+                  {(["solid", "dash"] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => apply({ dash: d })}
+                      className={`flex-1 rounded px-2 py-1 text-xs capitalize ${
+                        dash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="text-[11px] text-neutral-500 hover:underline"
+                  onClick={() =>
+                    apply({
+                      color: DEFAULT_LINE_STROKE.color,
+                      width: DEFAULT_LINE_STROKE.width,
+                      dash: "solid",
+                    })
+                  }
+                >
+                  Reset to dark / 3px / solid
+                </button>
+              </Section>
+            );
+          })()}
+
+          {(tool === "border" || selectedBorder) && (
+              <Section title="Border">
+                <p className="mb-2 text-xs text-neutral-600">
+                  {selectedBorder
+                    ? "Clip region of the selected border. New shapes go inside the active border."
+                    : "Default for new borders. Click/drag on canvas · Enter to finish (3+ points)."}
+                </p>
+                <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
+                  Color
+                  <input
+                    type="color"
+                    value={borderUiColor}
+                    onChange={(e) =>
+                      commitBorderAppearance(e.target.value, borderUiWidth, borderUiDash)
+                    }
+                    className="h-6 w-10 rounded border border-neutral-300"
+                  />
+                </label>
+                <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                  Width
+                  <input
+                    type="range"
+                    min={1}
+                    max={24}
+                    step={1}
+                    value={borderUiWidth}
+                    onChange={(e) =>
+                      commitBorderAppearance(borderUiColor, Number(e.target.value), borderUiDash)
+                    }
+                    className="w-24 accent-brand"
+                  />
+                  <span className="w-6 font-mono">{borderUiWidth}</span>
+                  px
+                </label>
+                <div className="mb-2 flex gap-1">
+                  {(["solid", "dash"] as const).map((d) => (
+                    <button
+                      key={d}
+                      type="button"
+                      onClick={() => commitBorderAppearance(borderUiColor, borderUiWidth, d)}
+                      className={`flex-1 rounded px-2 py-1 text-xs capitalize ${
+                        borderUiDash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
+                      }`}
+                    >
+                      {d}
+                    </button>
+                  ))}
+                </div>
+                {selectedBorder && (
+                  <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                    <input
+                      type="checkbox"
+                      checked={selectedBorder.clip}
+                      onChange={(e) =>
+                        commitBorderAppearance(
+                          borderUiColor,
+                          borderUiWidth,
+                          borderUiDash,
+                          e.target.checked,
+                        )
+                      }
+                    />
+                    Clip contents
+                  </label>
+                )}
+                {borderList.length > 0 && (
+                  <div className="mb-2">
+                    <div className="mb-1 text-[11px] text-neutral-500">Borders</div>
+                    <div className="flex flex-col gap-0.5">
+                      {borderList.map((b, i) => (
+                        <button
+                          key={b.id}
+                          type="button"
+                          onClick={() => {
+                            selectId(b.id);
+                            const node = project ? containerForBorder(project, b.id) : null;
+                            if (node) {
+                              updateActive((p) => setActiveContainer(p, node.id), { history: "skip" });
+                            }
+                          }}
+                          className={`rounded px-2 py-1 text-left text-xs ${
+                            selectedId === b.id ? "bg-brand text-white" : "bg-neutral-100 text-neutral-700"
+                          }`}
+                        >
+                          {b.name?.trim() || `Border ${i + 1}`}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {selectedBorder && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-red-600 hover:underline"
+                    onClick={deleteSelected}
+                  >
+                    Delete border
+                  </button>
+                )}
+                {!selectedBorder && (
+                  <button
+                    type="button"
+                    className="text-[11px] text-neutral-500 hover:underline"
+                    onClick={() =>
+                      commitBorderAppearance(
+                        DEFAULT_BORDER_STROKE.color,
+                        DEFAULT_BORDER_STROKE.width,
+                        "solid",
+                      )
+                    }
+                  >
+                    Reset to dark / 2px / solid
+                  </button>
+                )}
+              </Section>
           )}
 
           {selShape && (
             <Section title="Shape" right={<span className="text-xs text-neutral-400">{selShape.kind}</span>}>
-              <div className="mb-2 text-xs text-neutral-600">Category</div>
-              <div className="mb-3 flex flex-wrap gap-1">
-                {DRAW_CATEGORIES.map((c) => (
-                  <button
-                    key={c}
-                    onClick={() => patchShape(selShape.id, { category: c, fill: defaultFill(c) })}
-                    className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
-                      selShape.category === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
-                    }`}
-                  >
-                    <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
-                    {CATEGORY_LABEL[c]}
-                  </button>
-                ))}
-              </div>
-              <label className="mb-2 flex items-center justify-between text-xs">
-                Fill override
-                <input
-                  type="color"
-                  value={selShape.fill}
-                  onChange={(e) => patchShape(selShape.id, { fill: e.target.value })}
-                  className="h-6 w-10 rounded border border-neutral-300"
-                />
-              </label>
+              {!isLineShape(selShape) && (
+                <>
+                  <div className="mb-2 text-xs text-neutral-600">Category</div>
+                  <div className="mb-3 flex flex-wrap gap-1">
+                    {DRAW_CATEGORIES.map((c) => (
+                      <button
+                        key={c}
+                        onClick={() => patchShape(selShape.id, { category: c, fill: defaultFill(c) })}
+                        className={`flex items-center gap-1 rounded px-2 py-1 text-xs ${
+                          selShape.category === c ? "ring-2 ring-brand" : "ring-1 ring-neutral-300"
+                        }`}
+                      >
+                        <span className="h-3 w-3 rounded-sm" style={{ background: CATEGORY_COLORS[c] }} />
+                        {CATEGORY_LABEL[c]}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="mb-2 flex items-center justify-between text-xs">
+                    Fill override
+                    <input
+                      type="color"
+                      value={selShape.fill}
+                      onChange={(e) => patchShape(selShape.id, { fill: e.target.value })}
+                      className="h-6 w-10 rounded border border-neutral-300"
+                    />
+                  </label>
+                </>
+              )}
               <label className="mb-3 block text-xs">
                 Name
                 <input
@@ -1083,42 +1697,6 @@ export default function ManualPage() {
               </div>
             </Section>
           )}
-
-          <Section title="Project">
-            <div className="flex flex-wrap gap-2">
-              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New tab content</button>
-              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
-                Export tab
-              </button>
-              <button onClick={exportAllTabs} disabled={!workspace} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
-                Export all tabs
-              </button>
-              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
-                Import
-              </button>
-              <button onClick={() => importSvgRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
-                Import SVG
-              </button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
-              />
-              <input
-                ref={importSvgRef}
-                type="file"
-                accept="image/svg+xml,.svg"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && importSvg(e.target.files[0])}
-              />
-            </div>
-            <p className="mt-2 text-[11px] text-neutral-400">
-              Import accepts a single floor JSON or a full workspace (adds as new tabs).
-              Import SVG recovers a lost project from an exported SVG (no denah, kinds→poly).
-            </p>
-          </Section>
 
           <Section title="Floor badge">
             <p className="mb-2 text-[11px] text-neutral-400">
@@ -1391,16 +1969,20 @@ export default function ManualPage() {
               {tool === "ellipse" && "Drag to draw oval · Shift = circle"}
               {tool === "poly" &&
                 "Click = corner · drag = curve · exact cursor · Space = pan"}
-              {tool === "outline" &&
+              {tool === "line" &&
+                "Click = corner · drag = curve · Enter finish (2+ pts) · exact cursor · Space = pan"}
+              {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
+              {tool === "border" &&
+                "Trace clip region · click/drag curves · Enter finish (3+ pts) · exact cursor · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&
                 "Alt-drag from selected point / mid-edge = curve · ⌘/Ctrl-drag = precise · click point then ⌫ = delete point · right-click edge = add point"}
             </span>
           </div>
 
-          <div ref={editorHostRef} className="relative min-h-0 flex-1 overflow-hidden">
-            {project && (hasImage || project.shapes.length > 0 || project.shell) ? (
+          <div ref={editorHostRef} className="relative min-h-0 flex-1 touch-none overflow-hidden">
+            {project && (hasImage || project.shapes.length > 0 || project.shell || getBorders(project).length > 0) ? (
               <div className="absolute inset-0">
                 <ManualCanvas
                   key={workspace?.activeTabId ?? "tab"}
@@ -1416,8 +1998,13 @@ export default function ManualPage() {
                   onAddShape={addShape}
                   onUpdateShapeVerts={updateShapeVerts}
                   onSetShell={setShell}
+                  onAddBorder={addBorder}
+                  onUpdateBorderVerts={updateBorderGeometry}
                   onRequestTool={setTool}
                   onUpdateBadgeLayout={updateBadgeLayout}
+                  onDraftActive={(active) => {
+                    draftActiveRef.current = active;
+                  }}
                 />
               </div>
             ) : (

@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, MouseEvent } from "react";
 import type { Point } from "@/lib/types";
 import {
   bendEdge,
@@ -11,21 +11,35 @@ import {
   exportToSource,
   flattenPolyVertsOpen,
   getDrawOpacity,
+  getLayerTree,
+  getLineDefaults,
+  getBorders,
+  borderById,
+  borderIdForNode,
+  borderVertsOf,
+  containerForBorder,
+  isBorderId,
+  isNodeVisible,
+  isNodeLocked,
   getShellStroke,
   getStroke,
   insertVertOnEdge,
+  isLineShape,
   isShapeLocked,
   isShapeVisible,
   nearestEdge,
   orderedShapeIds,
   pathDFromVerts,
   pickBendEdge,
+  shapeLineStroke,
   shapeVerts,
   shellVertsOf,
   sourceToExport,
   syncShapeFromVerts,
+  dashArray,
   SHELL_ID,
   type ManualBadgeLayout,
+  type ManualNode,
   type ManualProject,
   type ManualShape,
   type PolyVert,
@@ -37,8 +51,11 @@ const BRAND = "#0D9488";
 const BRAND_SOFT = "#0D948822";
 const DRAG_THRESH_PX = 4;
 const BADGE_STROKE = AEON_CONFIG.badge.stroke;
+const ZOOM_MIN = 0.05;
+const ZOOM_MAX = 40;
+const ZOOM_STEP = 1.25;
 
-export type Tool = "select" | "rect" | "ellipse" | "poly" | "outline" | "badge";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "line" | "border" | "badge";
 
 interface Props {
   project: ManualProject;
@@ -53,14 +70,17 @@ interface Props {
   onAddShape: (shape: ManualShape) => void;
   onUpdateShapeVerts: (id: string, verts: PolyVert[]) => void;
   onSetShell: (verts: PolyVert[]) => void;
+  onAddBorder?: (verts: PolyVert[]) => void;
+  onUpdateBorderVerts?: (id: string, verts: PolyVert[]) => void;
   onRequestTool?: (tool: Tool) => void;
   onUpdateBadgeLayout?: (layout: ManualBadgeLayout) => void;
+  onDraftActive?: (active: boolean) => void;
 }
 
 type View = { scale: number; tx: number; ty: number };
 
 type PolyDraft = {
-  kind: "poly" | "outline";
+  kind: "poly" | "shell" | "line" | "border";
   verts: PolyVert[];
   cur: Point;
 };
@@ -139,8 +159,11 @@ export default function ManualCanvas({
   onAddShape,
   onUpdateShapeVerts,
   onSetShell,
+  onAddBorder,
+  onUpdateBorderVerts,
   onRequestTool,
   onUpdateBadgeLayout,
+  onDraftActive,
 }: Props) {
   const { bg, shapes } = project;
   const shellV = shellVertsOf(project);
@@ -156,6 +179,7 @@ export default function ManualCanvas({
   const paintOrder = orderedShapeIds(project)
     .map((id) => shapes.find((s) => s.id === id))
     .filter((s): s is ManualShape => !!s && isShapeVisible(project, s.id));
+  const hostRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const contentRef = useRef<SVGGElement>(null);
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
@@ -187,9 +211,13 @@ export default function ManualCanvas({
   }, [poly]);
 
   useEffect(() => {
+    onDraftActive?.(!!(poly || placing));
+  }, [poly, placing, onDraftActive]);
+
+  useEffect(() => {
     setRectDraft(null);
     setPlacing(null);
-    if ((tool === "poly" || tool === "outline") && polyRef.current) {
+    if ((tool === "poly" || tool === "shell" || tool === "line" || tool === "border") && polyRef.current) {
       setPoly((p) => (p ? { ...p, kind: tool } : p));
     }
   }, [tool]);
@@ -246,6 +274,12 @@ export default function ManualCanvas({
           if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
         }
       }
+      for (const b of getBorders(project)) {
+        if (b.id === excludeId) continue;
+        for (const v of borderVertsOf(b)) {
+          if (Math.abs(v.p[0] - p[0]) < th && Math.abs(v.p[1] - p[1]) < th) return [v.p[0], v.p[1]];
+        }
+      }
       for (const s of shapes) {
         if (s.id === excludeId) continue;
         for (const v of shapeVerts(s)) {
@@ -255,7 +289,7 @@ export default function ManualCanvas({
       const g = gridSize > 0 ? gridSize : 1;
       return [Math.round(p[0] / g) * g, Math.round(p[1] / g) * g];
     },
-    [snap, shapes, shellV, view.scale, gridSize],
+    [snap, shapes, shellV, view.scale, gridSize, project],
   );
 
   function constrain(prev: Point, cur: Point): Point {
@@ -267,19 +301,74 @@ export default function ManualCanvas({
     return [prev[0] + Math.sign(dx) * m, prev[1] + Math.sign(dy) * m];
   }
 
-  const onWheel = useCallback(
-    (e: WheelEvent) => {
-      e.preventDefault();
-      const [mx, my] = clientToSvg(e.clientX, e.clientY);
+  const zoomToward = useCallback(
+    (nextScale: number, clientX?: number, clientY?: number) => {
+      const svg = svgRef.current;
+      let mx: number;
+      let my: number;
+      if (clientX != null && clientY != null) {
+        [mx, my] = clientToSvg(clientX, clientY);
+      } else if (svg) {
+        const rect = svg.getBoundingClientRect();
+        [mx, my] = clientToSvg(rect.left + rect.width / 2, rect.top + rect.height / 2);
+      } else {
+        setView((v) => ({ ...v, scale: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextScale)) }));
+        return;
+      }
       setView((v) => {
-        const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
-        const ns = Math.min(40, Math.max(0.05, v.scale * factor));
+        const ns = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, nextScale));
+        if (ns === v.scale) return v;
         const k = ns / v.scale;
         return { scale: ns, tx: mx - k * (mx - v.tx), ty: my - k * (my - v.ty) };
       });
     },
     [clientToSvg],
   );
+
+  const resetView = useCallback(() => setView({ scale: 1, tx: 0, ty: 0 }), []);
+
+  const [zoomDraft, setZoomDraft] = useState(() => String(Math.round(view.scale * 100)));
+  useEffect(() => {
+    setZoomDraft(String(Math.round(view.scale * 100)));
+  }, [view.scale]);
+
+  const commitZoomPercent = useCallback(
+    (raw: string) => {
+      const pct = Number(raw);
+      if (!Number.isFinite(pct)) {
+        setZoomDraft(String(Math.round(viewRef.current.scale * 100)));
+        return;
+      }
+      zoomToward(pct / 100);
+    },
+    [zoomToward],
+  );
+
+  // Trackpad pinch is a ctrl+wheel event. React's onWheel is passive, so
+  // preventDefault() is ignored and the browser zooms the whole page (sidebar,
+  // navbar, …). Bind a native non-passive listener on the editor surface.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onWheel = (e: globalThis.WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      zoomToward(viewRef.current.scale * factor, e.clientX, e.clientY);
+    };
+    const blockSafariPagePinch = (e: Event) => {
+      e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", blockSafariPagePinch, { passive: false });
+    el.addEventListener("gesturechange", blockSafariPagePinch, { passive: false });
+    el.addEventListener("gestureend", blockSafariPagePinch, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", blockSafariPagePinch);
+      el.removeEventListener("gesturechange", blockSafariPagePinch);
+      el.removeEventListener("gestureend", blockSafariPagePinch);
+    };
+  }, [zoomToward]);
 
   const beginPan = (e: MouseEvent) => {
     drag.current = {
@@ -292,20 +381,36 @@ export default function ManualCanvas({
     moved.current = false;
   };
 
-  const drawingPolyLike = tool === "poly" || tool === "outline";
+  const drawingPolyLike = tool === "poly" || tool === "shell" || tool === "line" || tool === "border";
   const draftPaused = !!poly && !drawingPolyLike;
+  const ringClosed = (id: string) => {
+    if (id === SHELL_ID) return true;
+    if (isBorderId(project, id)) return true;
+    const s = shapes.find((x) => x.id === id);
+    return !s || !isLineShape(s);
+  };
 
   const commitVerts = useCallback(
     (id: string, verts: PolyVert[]) => {
       if (id === SHELL_ID) onSetShell(verts);
+      else if (isBorderId(project, id)) onUpdateBorderVerts?.(id, verts);
       else onUpdateShapeVerts(id, verts);
     },
-    [onSetShell, onUpdateShapeVerts],
+    [onSetShell, onUpdateBorderVerts, onUpdateShapeVerts, project],
   );
 
   const commitPolyPlace = useCallback(
     (anchor: Point, handleOut: Point | undefined, clientDist: number) => {
-      const kind = tool === "outline" ? "outline" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
+      const kind =
+        tool === "shell"
+          ? "shell"
+          : tool === "line"
+            ? "line"
+            : tool === "border"
+              ? "border"
+              : tool === "poly"
+                ? "poly"
+                : polyRef.current?.kind ?? "poly";
       const vert: PolyVert =
         clientDist > DRAG_THRESH_PX && handleOut ? { p: anchor, handleOut } : { p: anchor };
       setPoly((prev) => {
@@ -340,7 +445,7 @@ export default function ManualCanvas({
       const maxDist = bendHitRadius(view.scale);
       const tryBend = (id: string, verts: PolyVert[]) => {
         const prefer = id === selectedId ? selectedVertIndex : null;
-        const edge = pickBendEdge(c, verts, maxDist, prefer);
+        const edge = pickBendEdge(c, verts, maxDist, prefer, ringClosed(id));
         if (!edge) return false;
         onSelect(id);
         onSelectVert(edge.index);
@@ -356,11 +461,18 @@ export default function ManualCanvas({
         return true;
       };
       if (selectedId === SHELL_ID && shellV && tryBend(SHELL_ID, shellV)) return;
+      if (selectedId && isBorderId(project, selectedId)) {
+        const b = borderById(project, selectedId);
+        if (b && tryBend(b.id, borderVertsOf(b))) return;
+      }
       if (selectedId && selectedId !== SHELL_ID) {
         const s = shapes.find((x) => x.id === selectedId);
         if (s && tryBend(s.id, shapeVerts(s))) return;
       }
       if (shellV && tryBend(SHELL_ID, shellV)) return;
+      for (const b of getBorders(project)) {
+        if (tryBend(b.id, borderVertsOf(b))) return;
+      }
       for (const s of shapes) {
         if (tryBend(s.id, shapeVerts(s))) return;
       }
@@ -562,18 +674,24 @@ export default function ManualCanvas({
     // prefer selected shape/shell, then any shape
     const candidates: { id: string; verts: PolyVert[] }[] = [];
     if (selectedId === SHELL_ID && shellV) candidates.push({ id: SHELL_ID, verts: shellV });
-    else if (selectedId) {
+    else if (selectedId && isBorderId(project, selectedId)) {
+      const b = borderById(project, selectedId);
+      if (b) candidates.push({ id: b.id, verts: borderVertsOf(b) });
+    } else if (selectedId) {
       const s = shapes.find((x) => x.id === selectedId);
       if (s) candidates.push({ id: s.id, verts: shapeVerts(s) });
     }
     if (shellV && selectedId !== SHELL_ID) candidates.push({ id: SHELL_ID, verts: shellV });
+    for (const b of getBorders(project)) {
+      if (b.id !== selectedId) candidates.push({ id: b.id, verts: borderVertsOf(b) });
+    }
     for (const s of shapes) {
       if (s.id !== selectedId) candidates.push({ id: s.id, verts: shapeVerts(s) });
     }
 
     let hit: { id: string; edgeIndex: number; q: Point; dist: number } | null = null;
     for (const cand of candidates) {
-      const edge = nearestEdge(c, cand.verts, maxDist);
+      const edge = nearestEdge(c, cand.verts, maxDist, ringClosed(cand.id));
       if (edge && (!hit || edge.dist < hit.dist)) {
         hit = { id: cand.id, edgeIndex: edge.index, q: edge.q, dist: edge.dist };
       }
@@ -582,7 +700,9 @@ export default function ManualCanvas({
     const src =
       hit.id === SHELL_ID
         ? shellV!
-        : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
+        : isBorderId(project, hit.id)
+          ? borderVertsOf(borderById(project, hit.id)!)
+          : shapeVerts(shapes.find((s) => s.id === hit!.id)!);
     const next = insertVertOnEdge(src, hit.edgeIndex, hit.q);
     commitVerts(hit.id, next);
     onSelect(hit.id);
@@ -594,21 +714,42 @@ export default function ManualCanvas({
     polyRef.current = null;
     setPoly(null);
     setPlacing(null);
-    if (prev && prev.verts.length >= 3) {
+    if (prev && (prev.kind === "line" ? prev.verts.length >= 2 : prev.verts.length >= 3)) {
       const synced = syncShapeFromVerts(prev.verts);
-      if (synced.points.length >= 3) {
-        if (prev.kind === "outline") {
+      if (prev.kind === "shell") {
+        if (synced.points.length >= 3) {
           onSetShell(synced.verts);
           onSelect(SHELL_ID);
-        } else {
-          onAddShape(makeShape("poly", synced.points, synced.verts));
         }
+      } else if (prev.kind === "border") {
+        if (synced.points.length >= 3) onAddBorder?.(synced.verts);
+      } else if (prev.kind === "line") {
+        if (synced.points.length >= 2) {
+          onAddShape(makeShape("line", synced.points, synced.verts));
+        }
+      } else if (synced.points.length >= 3) {
+        onAddShape(makeShape("poly", synced.points, synced.verts));
       }
     }
-  }, [onAddShape, makeShape, onSetShell, onSelect]);
+  }, [onAddShape, makeShape, onSetShell, onSelect, onAddBorder]);
 
   useEffect(() => {
     const kd = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === "=" || e.key === "+" || e.code === "Equal" || e.code === "NumpadAdd")) {
+        e.preventDefault();
+        zoomToward(viewRef.current.scale * ZOOM_STEP);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "-" || e.key === "_" || e.code === "Minus" || e.code === "NumpadSubtract")) {
+        e.preventDefault();
+        zoomToward(viewRef.current.scale / ZOOM_STEP);
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === "0" || e.code === "Digit0" || e.code === "Numpad0")) {
+        e.preventDefault();
+        resetView();
+        return;
+      }
       const tag = (e.target as HTMLElement)?.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA") return;
       if (e.code === "Space") {
@@ -655,9 +796,7 @@ export default function ManualCanvas({
       window.removeEventListener("keydown", kd);
       window.removeEventListener("keyup", ku);
     };
-  }, [drawingPolyLike, closePoly, onSelectVert]);
-
-  const resetView = () => setView({ scale: 1, tx: 0, ty: 0 });
+  }, [drawingPolyLike, closePoly, onSelectVert, zoomToward, resetView]);
 
   const beginVertexDrag = (e: MouseEvent, verts: PolyVert[], i: number, id: string) => {
     e.stopPropagation();
@@ -699,7 +838,7 @@ export default function ManualCanvas({
       }
       const c = toContent(e.clientX, e.clientY);
       const prefer = id === selectedId ? selectedVertIndex : null;
-      const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer);
+      const edge = pickBendEdge(c, verts, bendHitRadius(view.scale), prefer, ringClosed(id));
       if (edge) {
         onSelect(id);
         onSelectVert(edge.index);
@@ -718,8 +857,12 @@ export default function ManualCanvas({
 
     onSelect(id);
     onSelectVert(null);
-    // Locked shapes: select only, no drag-move
-    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
+    if (id !== SHELL_ID) {
+      if (isBorderId(project, id)) {
+        const node = containerForBorder(project, id);
+        if (node && isNodeLocked(project, node.id)) return;
+      } else if (isShapeLocked(project, id)) return;
+    }
     drag.current = {
       mode: "move",
       startClient: { x: e.clientX, y: e.clientY },
@@ -733,7 +876,12 @@ export default function ManualCanvas({
   const beginRotate = (e: MouseEvent, verts: PolyVert[], id: string) => {
     e.stopPropagation();
     e.preventDefault();
-    if (id !== SHELL_ID && isShapeLocked(project, id)) return;
+    if (id !== SHELL_ID) {
+      if (isBorderId(project, id)) {
+        const node = containerForBorder(project, id);
+        if (node && isNodeLocked(project, node.id)) return;
+      } else if (isShapeLocked(project, id)) return;
+    }
     if (verts.length === 0) return;
     let cx = 0;
     let cy = 0;
@@ -768,19 +916,30 @@ export default function ManualCanvas({
   const shellLive = shellV ? liveVertsFor(SHELL_ID, shellV) : null;
   const isShellSel = selectedId === SHELL_ID;
 
-  const selectedShape = selectedId && selectedId !== SHELL_ID ? shapes.find((s) => s.id === selectedId) : null;
+  const selectedBorder = selectedId && isBorderId(project, selectedId) ? borderById(project, selectedId) : null;
+  const selectedShape =
+    selectedId && selectedId !== SHELL_ID && !selectedBorder
+      ? shapes.find((s) => s.id === selectedId)
+      : null;
   const selectedVerts = selectedShape
     ? liveVertsFor(selectedShape.id, shapeVerts(selectedShape))
-    : isShellSel && shellLive
-      ? shellLive
-      : null;
+    : selectedBorder
+      ? liveVertsFor(selectedBorder.id, borderVertsOf(selectedBorder))
+      : isShellSel && shellLive
+        ? shellLive
+        : null;
 
   const cursorClass =
     tool === "select" || tool === "badge"
       ? "cursor-default active:cursor-grabbing"
       : "cursor-crosshair";
 
-  const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
+  const previewStroke =
+    poly?.kind === "shell" || tool === "shell" || poly?.kind === "border" || tool === "border"
+      ? "#111827"
+      : poly?.kind === "line" || tool === "line"
+        ? getLineDefaults(project).color
+        : BRAND;
 
   // Frame the export canvas (mapped into source space) unioned with the denah image
   // bounds — NEVER the badge. The badge is clamped inside the canvas, so it is always
@@ -818,28 +977,201 @@ export default function ManualCanvas({
       ? flattenPolyVertsOpen(draftVerts, drawingPolyLike && !placing && poly ? poly.cur : undefined)
       : [];
 
+  const layerTree = getLayerTree(project);
+  const activeBorderContainerId =
+    tool === "border" && layerTree.activeContainerId && borderIdForNode(project, layerTree.activeContainerId)
+      ? layerTree.activeContainerId
+      : null;
+  const dimForAncestors = (ancestors: string[]) =>
+    !!activeBorderContainerId && !ancestors.includes(activeBorderContainerId);
+
+  const paintFills = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind === "leaf") {
+        const s = shapes.find((x) => x.id === n.shapeId);
+        if (!s || !isShapeVisible(project, s.id)) return null;
+        const dim = dimForAncestors(ancestors);
+        const verts = liveVertsFor(s.id, shapeVerts(s));
+        if (isLineShape(s)) {
+          const isSel = s.id === selectedId;
+          const isHov = hovered === s.id;
+          const ls = shapeLineStroke(s, project);
+          const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
+          const sw = isSel ? ls.width * 1.6 : ls.width;
+          return (
+            <path
+              key={`f-${s.id}`}
+              d={pathDFromVerts(verts, false)}
+              fill="none"
+              stroke={stroke}
+              strokeWidth={sw}
+              strokeDasharray={dashArray(sw, s.dash)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              opacity={dim ? 0.4 : 1}
+              pointerEvents="none"
+            />
+          );
+        }
+        return (
+          <path
+            key={`f-${s.id}`}
+            d={pathDFromVerts(verts)}
+            fill={s.fill || defaultFill(s.category)}
+            stroke="none"
+            opacity={dim ? 0.4 : 1}
+            pointerEvents="none"
+          />
+        );
+      }
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const kids = paintFills(n.children, [...ancestors, n.id]);
+      if (border?.clip) {
+        return (
+          <g key={`f-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      return <g key={`f-${n.id}`}>{kids}</g>;
+    });
+
+  const paintStrokes = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind === "leaf") {
+        const s = shapes.find((x) => x.id === n.shapeId);
+        if (!s || !isShapeVisible(project, s.id) || isLineShape(s)) return null;
+        const dim = dimForAncestors(ancestors);
+        const verts = liveVertsFor(s.id, shapeVerts(s));
+        const isSel = s.id === selectedId;
+        const isHov = hovered === s.id;
+        const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
+        const sw = isSel ? strokeW * 1.6 : strokeW;
+        return (
+          <path
+            key={`o-${s.id}`}
+            d={pathDFromVerts(verts)}
+            fill="none"
+            stroke={stroke}
+            strokeWidth={sw}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            opacity={dim ? 0.4 : 1}
+            pointerEvents="none"
+          />
+        );
+      }
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const kids = paintStrokes(n.children, [...ancestors, n.id]);
+      if (border?.clip) {
+        return (
+          <g key={`o-${n.id}`} clipPath={`url(#mc-border-${border.id})`}>
+            {kids}
+          </g>
+        );
+      }
+      return <g key={`o-${n.id}`}>{kids}</g>;
+    });
+
+  const paintBorderOutlines = (nodes: ManualNode[]): React.ReactNode =>
+    nodes.map((n) => {
+      if (n.kind !== "container") return null;
+      if (!isNodeVisible(project, n.id)) return null;
+      const border = n.borderId ? borderById(project, n.borderId) : null;
+      const bv = border ? liveVertsFor(border.id, borderVertsOf(border)) : null;
+      const isSel = border ? selectedId === border.id : false;
+      return (
+        <g key={`bo-${n.id}`}>
+          {bv && bv.length >= 2 && border && (
+            <path
+              d={pathDFromVerts(bv)}
+              fill="none"
+              stroke={isSel ? BRAND : border.stroke.color}
+              strokeWidth={isSel ? border.stroke.width * 2 : border.stroke.width}
+              strokeDasharray={dashArray(border.stroke.width, border.dash)}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              className={tool === "select" ? "cursor-move" : ""}
+              pointerEvents={tool === "select" ? "stroke" : "none"}
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => beginMove(e, bv, border.id)}
+            />
+          )}
+          {paintBorderOutlines(n.children)}
+        </g>
+      );
+    });
+
   return (
-    <div className="relative h-full w-full overflow-hidden checkerboard">
-      <div className="absolute right-3 top-3 z-10 flex gap-2">
-        <button onClick={resetView} className="rounded bg-white/90 px-2 py-1 text-xs shadow ring-1 ring-neutral-300">
-          Reset view
+    <div ref={hostRef} className="relative h-full w-full touch-none overflow-hidden checkerboard">
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded bg-white/90 p-0.5 text-xs shadow ring-1 ring-neutral-300">
+        <button
+          type="button"
+          onClick={() => zoomToward(view.scale / ZOOM_STEP)}
+          className="rounded px-1.5 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Zoom out (⌘−)"
+        >
+          −
         </button>
-        <span className="rounded bg-white/90 px-2 py-1 text-xs shadow ring-1 ring-neutral-300">
-          {Math.round(view.scale * 100)}%
-        </span>
+        <form
+          className="flex items-center"
+          onSubmit={(e) => {
+            e.preventDefault();
+            commitZoomPercent(zoomDraft);
+          }}
+        >
+          <input
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]*"
+            value={zoomDraft}
+            onChange={(e) => setZoomDraft(e.target.value)}
+            onBlur={() => commitZoomPercent(zoomDraft)}
+            className="w-12 bg-transparent px-0.5 py-1 text-center font-mono outline-none"
+            title="Zoom percent"
+            aria-label="Zoom percent"
+          />
+          <span className="pr-1 text-neutral-500">%</span>
+        </form>
+        <button
+          type="button"
+          onClick={() => zoomToward(view.scale * ZOOM_STEP)}
+          className="rounded px-1.5 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Zoom in (⌘=)"
+        >
+          +
+        </button>
+        <button
+          type="button"
+          onClick={resetView}
+          className="rounded px-2 py-1 text-neutral-700 hover:bg-neutral-100"
+          title="Fit view (⌘0)"
+        >
+          Fit
+        </button>
       </div>
 
       {draftPaused && poly && (
         <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink/90 px-3 py-1.5 text-xs text-white shadow">
           <span>
-            {poly.kind === "outline" ? "Outline" : "Polygon"} in progress ({poly.verts.length} pts)
+            {poly.kind === "shell"
+              ? "Shell"
+              : poly.kind === "border"
+                ? "Border"
+                : poly.kind === "line"
+                  ? "Line"
+                  : "Polygon"}{" "}
+            in progress ({poly.verts.length} pts)
           </span>
           <button
             type="button"
             className="rounded bg-brand px-2 py-0.5 font-medium text-white"
             onClick={() => onRequestTool?.(poly.kind)}
           >
-            Continue ({poly.kind === "outline" ? "O" : "P"})
+            Continue (
+            {poly.kind === "shell" ? "O" : poly.kind === "border" ? "B" : poly.kind === "line" ? "L" : "P"})
           </button>
           <span className="text-white/60">Esc cancel · Space pan</span>
         </div>
@@ -850,7 +1182,6 @@ export default function ManualCanvas({
         className={`h-full w-full ${cursorClass}`}
         viewBox={`${vbMinX} ${vbMinY} ${vbW} ${vbH}`}
         preserveAspectRatio="xMidYMid meet"
-        onWheel={onWheel}
         onContextMenu={onContextMenu}
         onMouseDown={(e) => {
           onPolyMouseDown(e);
@@ -878,6 +1209,16 @@ export default function ManualCanvas({
               <path d={pathDFromVerts(shellLive)} />
             </clipPath>
           )}
+          {getBorders(project).map((b) => {
+            if (!b.clip) return null;
+            const verts = liveVertsFor(b.id, borderVertsOf(b));
+            if (verts.length < 3) return null;
+            return (
+              <clipPath key={b.id} id={`mc-border-${b.id}`}>
+                <path d={pathDFromVerts(verts)} />
+              </clipPath>
+            );
+          })}
         </defs>
         <g
           ref={contentRef}
@@ -903,37 +1244,9 @@ export default function ManualCanvas({
 
             {/* Clip unit paint to shell; hit targets + vertex handles stay outside so edge edits remain usable. */}
             <g clipPath={shellLive ? "url(#manual-shell)" : undefined}>
-              {paintOrder.map((s) => {
-                const verts = liveVertsFor(s.id, shapeVerts(s));
-                return (
-                  <path
-                    key={`f-${s.id}`}
-                    d={pathDFromVerts(verts)}
-                    fill={s.fill || defaultFill(s.category)}
-                    stroke="none"
-                    pointerEvents="none"
-                  />
-                );
-              })}
-              {paintOrder.map((s) => {
-                const verts = liveVertsFor(s.id, shapeVerts(s));
-                const isSel = s.id === selectedId;
-                const isHov = hovered === s.id;
-                const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
-                const sw = isSel ? strokeW * 1.6 : strokeW;
-                return (
-                  <path
-                    key={`o-${s.id}`}
-                    d={pathDFromVerts(verts)}
-                    fill="none"
-                    stroke={stroke}
-                    strokeWidth={sw}
-                    strokeLinejoin="round"
-                    strokeLinecap="round"
-                    pointerEvents="none"
-                  />
-                );
-              })}
+              {paintFills(layerTree.root, [])}
+              {paintStrokes(layerTree.root, [])}
+              {paintBorderOutlines(layerTree.root)}
             </g>
 
             {shellLive && (
@@ -956,6 +1269,25 @@ export default function ManualCanvas({
             paintOrder.map((s) => {
               const verts = liveVertsFor(s.id, shapeVerts(s));
               const locked = isShapeLocked(project, s.id);
+              if (isLineShape(s)) {
+                const ls = shapeLineStroke(s, project);
+                return (
+                  <path
+                    key={`h-${s.id}`}
+                    d={pathDFromVerts(verts, false)}
+                    fill="none"
+                    stroke="transparent"
+                    strokeWidth={Math.max(ls.width, 12 / view.scale)}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    className={locked ? "cursor-default" : "cursor-move"}
+                    onMouseEnter={() => setHovered(s.id)}
+                    onMouseLeave={() => setHovered(null)}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => beginMove(e, verts, s.id)}
+                  />
+                );
+              }
               return (
                 <path
                   key={`h-${s.id}`}
@@ -1187,7 +1519,14 @@ export default function ManualCanvas({
 
       {drawingPolyLike && (poly || placing) && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
-          {poly?.kind === "outline" || tool === "outline" ? "Outline" : "Polygon"} ·{" "}
+          {poly?.kind === "shell" || tool === "shell"
+            ? "Shell"
+            : poly?.kind === "border" || tool === "border"
+              ? "Border"
+              : poly?.kind === "line" || tool === "line"
+                ? "Line"
+                : "Polygon"}{" "}
+          ·{" "}
           {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
           pan · ⌘Z undo · Enter close · Esc cancel
         </div>
