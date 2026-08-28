@@ -58,6 +58,7 @@ interface Props {
   onSetShell: (verts: PolyVert[]) => void;
   onRequestTool?: (tool: Tool) => void;
   onUpdateBadgeLayout?: (layout: ManualBadgeLayout) => void;
+  onDraftActive?: (active: boolean) => void;
 }
 
 type View = { scale: number; tx: number; ty: number };
@@ -144,6 +145,7 @@ export default function ManualCanvas({
   onSetShell,
   onRequestTool,
   onUpdateBadgeLayout,
+  onDraftActive,
 }: Props) {
   const { bg, shapes } = project;
   const shellV = shellVertsOf(project);
@@ -188,6 +190,10 @@ export default function ManualCanvas({
   useEffect(() => {
     polyRef.current = poly;
   }, [poly]);
+
+  useEffect(() => {
+    onDraftActive?.(!!(poly || placing));
+  }, [poly, placing, onDraftActive]);
 
   useEffect(() => {
     setRectDraft(null);
