@@ -95,7 +95,7 @@ function ToolIcon({ name }: { name: Tool }) {
           <path d="M4 4l7 16 2.5-6.5L20 11z" />
         </svg>
       );
-    case "outline":
+    case "shell":
       return (
         <svg {...common} aria-hidden>
           <path d="M4 8h16M4 16h16M8 4v16M16 4v16" opacity={0.35} />
@@ -416,7 +416,7 @@ export default function ManualPage() {
   const deleteSelected = useCallback(() => {
     if (!selectedId) return;
     if (selectedId === SHELL_ID) {
-      if (!confirm("Delete outer outline? Units will no longer be clipped.")) return;
+      if (!confirm("Delete shell? Units will no longer be clipped.")) return;
       updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
       setSelectedId(null);
       setSelectedVertIndex(null);
@@ -441,7 +441,7 @@ export default function ManualPage() {
   );
 
   const clearShell = useCallback(() => {
-    if (!confirm("Clear outer outline? Units will no longer be clipped.")) return;
+    if (!confirm("Clear shell? Units will no longer be clipped.")) return;
     updateActive((p) => ({ ...p, shell: null, shellVerts: null }));
     if (selectedId === SHELL_ID) {
       setSelectedId(null);
@@ -801,7 +801,7 @@ export default function ManualPage() {
       else if (e.key === "r" || e.key === "R") setTool("rect");
       else if (e.key === "e" || e.key === "E") setTool("ellipse");
       else if (e.key === "p" || e.key === "P") setTool("poly");
-      else if (e.key === "o" || e.key === "O") setTool("outline");
+      else if (e.key === "o" || e.key === "O" || e.key === "s" || e.key === "S") setTool("shell");
       else if (e.key === "b" || e.key === "B") setTool("badge");
       else if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
@@ -836,7 +836,7 @@ export default function ManualPage() {
 
   const TOOLS: { key: Tool; label: string; hint: string }[] = [
     { key: "select", label: "Select", hint: "V" },
-    { key: "outline", label: "Outline", hint: "O" },
+    { key: "shell", label: "Shell", hint: "O" },
     { key: "rect", label: "Rect", hint: "R" },
     { key: "ellipse", label: "Ellipse", hint: "E" },
     { key: "poly", label: "Poly", hint: "P" },
@@ -864,6 +864,42 @@ export default function ManualPage() {
       <div className="flex min-h-0 flex-1">
         {/* LEFT — controls */}
         <aside className="w-80 shrink-0 overflow-y-auto border-r border-neutral-200 bg-white">
+          <Section title="Project">
+            <div className="flex flex-wrap gap-2">
+              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New tab content</button>
+              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export tab
+              </button>
+              <button onClick={exportAllTabs} disabled={!workspace} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
+                Export all tabs
+              </button>
+              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import
+              </button>
+              <button onClick={() => importSvgRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
+                Import SVG
+              </button>
+              <input
+                ref={importRef}
+                type="file"
+                accept="application/json"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
+              />
+              <input
+                ref={importSvgRef}
+                type="file"
+                accept="image/svg+xml,.svg"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && importSvg(e.target.files[0])}
+              />
+            </div>
+            <p className="mt-2 text-[11px] text-neutral-400">
+              Import accepts a single floor JSON or a full workspace (adds as new tabs).
+              Import SVG recovers a lost project from an exported SVG (no denah, kinds→poly).
+            </p>
+          </Section>
+
           <Section title="Input">
             <Uploader floor={project?.floor ?? "1F"} onFloor={setFloor} onFile={onFile} fileName={file?.name} />
           </Section>
@@ -954,10 +990,15 @@ export default function ManualPage() {
                 Reset to white / 2px
               </button>
             </div>
-            <div className="mt-3 border-t border-neutral-100 pt-3 text-xs text-neutral-600">
-              <div className="mb-1 font-medium text-neutral-600">Outer outline (shell)</div>
-              <div className="mb-2 text-neutral-500">
-                {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — use Outline tool"}
+          </Section>
+
+          {(tool === "shell" || shellSelected) && (
+            <Section title="Shell">
+              <p className="mb-2 text-xs text-neutral-600">
+                Outer floor-plate. Units outside this boundary are clipped.
+              </p>
+              <div className="mb-2 text-xs text-neutral-500">
+                {shellPts ? `${shellPts.length} pts — clips overflowing units` : "Not set — click on the canvas to trace"}
               </div>
               <label className="mb-2 flex items-center justify-between text-xs text-neutral-700">
                 Color
@@ -992,7 +1033,7 @@ export default function ManualPage() {
               >
                 Reset to white / 2px
               </button>
-              <div className="flex gap-2">
+              <div className="mb-2 flex gap-2">
                 {shellPts && (
                   <button
                     onClick={() => {
@@ -1012,15 +1053,7 @@ export default function ManualPage() {
                   Clear shell
                 </button>
               </div>
-            </div>
-          </Section>
-
-          {shellSelected && (
-            <Section title="Shell">
-              <p className="mb-2 text-xs text-neutral-600">
-                Outer floor-plate outline. Units outside this boundary are clipped.
-              </p>
-              {selectedVertIndex != null && (
+              {shellSelected && selectedVertIndex != null && (
                 <button
                   onClick={deleteVert}
                   className="mb-2 w-full rounded bg-neutral-800 px-2 py-1 text-xs text-white"
@@ -1028,9 +1061,11 @@ export default function ManualPage() {
                   Delete point ⌫
                 </button>
               )}
-              <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
-                Delete shell ⌫
-              </button>
+              {shellSelected && (
+                <button onClick={deleteSelected} className="w-full rounded bg-red-600 px-2 py-1 text-xs text-white">
+                  Delete shell ⌫
+                </button>
+              )}
             </Section>
           )}
 
@@ -1083,42 +1118,6 @@ export default function ManualPage() {
               </div>
             </Section>
           )}
-
-          <Section title="Project">
-            <div className="flex flex-wrap gap-2">
-              <button onClick={doNew} className="rounded bg-neutral-200 px-2 py-1 text-sm">New tab content</button>
-              <button onClick={exportProject} disabled={!project} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
-                Export tab
-              </button>
-              <button onClick={exportAllTabs} disabled={!workspace} className="rounded bg-neutral-200 px-2 py-1 text-sm disabled:opacity-40">
-                Export all tabs
-              </button>
-              <button onClick={() => importRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
-                Import
-              </button>
-              <button onClick={() => importSvgRef.current?.click()} className="rounded bg-neutral-200 px-2 py-1 text-sm">
-                Import SVG
-              </button>
-              <input
-                ref={importRef}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && importJson(e.target.files[0])}
-              />
-              <input
-                ref={importSvgRef}
-                type="file"
-                accept="image/svg+xml,.svg"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && importSvg(e.target.files[0])}
-              />
-            </div>
-            <p className="mt-2 text-[11px] text-neutral-400">
-              Import accepts a single floor JSON or a full workspace (adds as new tabs).
-              Import SVG recovers a lost project from an exported SVG (no denah, kinds→poly).
-            </p>
-          </Section>
 
           <Section title="Floor badge">
             <p className="mb-2 text-[11px] text-neutral-400">
@@ -1391,7 +1390,7 @@ export default function ManualPage() {
               {tool === "ellipse" && "Drag to draw oval · Shift = circle"}
               {tool === "poly" &&
                 "Click = corner · drag = curve · exact cursor · Space = pan"}
-              {tool === "outline" &&
+              {tool === "shell" &&
                 "Trace outer boundary · click/drag curves · exact cursor · Space = pan"}
               {tool === "badge" && "Drag badge to move · corner handle to resize · Space = pan"}
               {tool === "select" &&

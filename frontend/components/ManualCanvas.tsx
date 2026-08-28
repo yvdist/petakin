@@ -38,7 +38,7 @@ const BRAND_SOFT = "#0D948822";
 const DRAG_THRESH_PX = 4;
 const BADGE_STROKE = AEON_CONFIG.badge.stroke;
 
-export type Tool = "select" | "rect" | "ellipse" | "poly" | "outline" | "badge";
+export type Tool = "select" | "rect" | "ellipse" | "poly" | "shell" | "badge";
 
 interface Props {
   project: ManualProject;
@@ -60,7 +60,7 @@ interface Props {
 type View = { scale: number; tx: number; ty: number };
 
 type PolyDraft = {
-  kind: "poly" | "outline";
+  kind: "poly" | "shell";
   verts: PolyVert[];
   cur: Point;
 };
@@ -189,7 +189,7 @@ export default function ManualCanvas({
   useEffect(() => {
     setRectDraft(null);
     setPlacing(null);
-    if ((tool === "poly" || tool === "outline") && polyRef.current) {
+    if ((tool === "poly" || tool === "shell") && polyRef.current) {
       setPoly((p) => (p ? { ...p, kind: tool } : p));
     }
   }, [tool]);
@@ -292,7 +292,7 @@ export default function ManualCanvas({
     moved.current = false;
   };
 
-  const drawingPolyLike = tool === "poly" || tool === "outline";
+  const drawingPolyLike = tool === "poly" || tool === "shell";
   const draftPaused = !!poly && !drawingPolyLike;
 
   const commitVerts = useCallback(
@@ -305,7 +305,7 @@ export default function ManualCanvas({
 
   const commitPolyPlace = useCallback(
     (anchor: Point, handleOut: Point | undefined, clientDist: number) => {
-      const kind = tool === "outline" ? "outline" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
+      const kind = tool === "shell" ? "shell" : tool === "poly" ? "poly" : polyRef.current?.kind ?? "poly";
       const vert: PolyVert =
         clientDist > DRAG_THRESH_PX && handleOut ? { p: anchor, handleOut } : { p: anchor };
       setPoly((prev) => {
@@ -597,7 +597,7 @@ export default function ManualCanvas({
     if (prev && prev.verts.length >= 3) {
       const synced = syncShapeFromVerts(prev.verts);
       if (synced.points.length >= 3) {
-        if (prev.kind === "outline") {
+        if (prev.kind === "shell") {
           onSetShell(synced.verts);
           onSelect(SHELL_ID);
         } else {
@@ -780,7 +780,7 @@ export default function ManualCanvas({
       ? "cursor-default active:cursor-grabbing"
       : "cursor-crosshair";
 
-  const previewStroke = poly?.kind === "outline" || tool === "outline" ? "#111827" : BRAND;
+  const previewStroke = poly?.kind === "shell" || tool === "shell" ? "#111827" : BRAND;
 
   // Frame the export canvas (mapped into source space) unioned with the denah image
   // bounds — NEVER the badge. The badge is clamped inside the canvas, so it is always
@@ -832,14 +832,14 @@ export default function ManualCanvas({
       {draftPaused && poly && (
         <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-full bg-ink/90 px-3 py-1.5 text-xs text-white shadow">
           <span>
-            {poly.kind === "outline" ? "Outline" : "Polygon"} in progress ({poly.verts.length} pts)
+            {poly.kind === "shell" ? "Shell" : "Polygon"} in progress ({poly.verts.length} pts)
           </span>
           <button
             type="button"
             className="rounded bg-brand px-2 py-0.5 font-medium text-white"
             onClick={() => onRequestTool?.(poly.kind)}
           >
-            Continue ({poly.kind === "outline" ? "O" : "P"})
+            Continue ({poly.kind === "shell" ? "O" : "P"})
           </button>
           <span className="text-white/60">Esc cancel · Space pan</span>
         </div>
@@ -1187,7 +1187,7 @@ export default function ManualCanvas({
 
       {drawingPolyLike && (poly || placing) && (
         <div className="pointer-events-none absolute bottom-3 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-3 py-1 text-xs text-white">
-          {poly?.kind === "outline" || tool === "outline" ? "Outline" : "Polygon"} ·{" "}
+          {poly?.kind === "shell" || tool === "shell" ? "Shell" : "Polygon"} ·{" "}
           {poly?.verts.length ?? 0} verts · click = corner · drag = curve · Shift = straight · Space =
           pan · ⌘Z undo · Enter close · Esc cancel
         </div>
