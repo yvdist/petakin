@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, WheelEvent, MouseEvent } from "react";
+import { useCallback, useEffect, useRef, useState, MouseEvent } from "react";
 import type { Point } from "@/lib/types";
 import {
   bendEdge,
@@ -179,6 +179,7 @@ export default function ManualCanvas({
   const paintOrder = orderedShapeIds(project)
     .map((id) => shapes.find((s) => s.id === id))
     .filter((s): s is ManualShape => !!s && isShapeVisible(project, s.id));
+  const hostRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
   const contentRef = useRef<SVGGElement>(null);
   const [view, setView] = useState<View>({ scale: 1, tx: 0, ty: 0 });
@@ -343,14 +344,31 @@ export default function ManualCanvas({
     [zoomToward],
   );
 
-  const onWheel = useCallback(
-    (e: WheelEvent) => {
+  // Trackpad pinch is a ctrl+wheel event. React's onWheel is passive, so
+  // preventDefault() is ignored and the browser zooms the whole page (sidebar,
+  // navbar, …). Bind a native non-passive listener on the editor surface.
+  useEffect(() => {
+    const el = hostRef.current;
+    if (!el) return;
+    const onWheel = (e: globalThis.WheelEvent) => {
       e.preventDefault();
       const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
       zoomToward(viewRef.current.scale * factor, e.clientX, e.clientY);
-    },
-    [zoomToward],
-  );
+    };
+    const blockSafariPagePinch = (e: Event) => {
+      e.preventDefault();
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    el.addEventListener("gesturestart", blockSafariPagePinch, { passive: false });
+    el.addEventListener("gesturechange", blockSafariPagePinch, { passive: false });
+    el.addEventListener("gestureend", blockSafariPagePinch, { passive: false });
+    return () => {
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("gesturestart", blockSafariPagePinch);
+      el.removeEventListener("gesturechange", blockSafariPagePinch);
+      el.removeEventListener("gestureend", blockSafariPagePinch);
+    };
+  }, [zoomToward]);
 
   const beginPan = (e: MouseEvent) => {
     drag.current = {
@@ -1087,7 +1105,7 @@ export default function ManualCanvas({
     });
 
   return (
-    <div className="relative h-full w-full overflow-hidden checkerboard">
+    <div ref={hostRef} className="relative h-full w-full touch-none overflow-hidden checkerboard">
       <div className="absolute right-3 top-3 z-10 flex items-center gap-0.5 rounded bg-white/90 p-0.5 text-xs shadow ring-1 ring-neutral-300">
         <button
           type="button"
@@ -1164,7 +1182,6 @@ export default function ManualCanvas({
         className={`h-full w-full ${cursorClass}`}
         viewBox={`${vbMinX} ${vbMinY} ${vbW} ${vbH}`}
         preserveAspectRatio="xMidYMid meet"
-        onWheel={onWheel}
         onContextMenu={onContextMenu}
         onMouseDown={(e) => {
           onPolyMouseDown(e);

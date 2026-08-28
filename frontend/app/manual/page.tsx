@@ -339,6 +339,38 @@ export default function ManualPage() {
     };
   }, [workspace]);
 
+  // Pinch-to-zoom over the editor must not scale the page chrome. Safari fires
+  // gesture* on the document; Chrome uses ctrl+wheel. Capture on the editor host.
+  useEffect(() => {
+    const host = editorHostRef.current;
+    if (!host) return;
+    const overHost = (e: Event) => {
+      if (e.target instanceof Node && host.contains(e.target)) return true;
+      const g = e as Event & { clientX?: number; clientY?: number };
+      if (typeof g.clientX === "number" && typeof g.clientY === "number") {
+        const top = document.elementFromPoint(g.clientX, g.clientY);
+        if (top && host.contains(top)) return true;
+      }
+      return host.matches(":hover");
+    };
+    const blockPageZoom = (e: Event) => {
+      if (overHost(e)) e.preventDefault();
+    };
+    const onWheel = (e: WheelEvent) => {
+      if ((e.ctrlKey || e.metaKey) && host.contains(e.target as Node)) e.preventDefault();
+    };
+    host.addEventListener("wheel", onWheel, { passive: false });
+    document.addEventListener("gesturestart", blockPageZoom, { passive: false, capture: true });
+    document.addEventListener("gesturechange", blockPageZoom, { passive: false, capture: true });
+    document.addEventListener("gestureend", blockPageZoom, { passive: false, capture: true });
+    return () => {
+      host.removeEventListener("wheel", onWheel);
+      document.removeEventListener("gesturestart", blockPageZoom, true);
+      document.removeEventListener("gesturechange", blockPageZoom, true);
+      document.removeEventListener("gestureend", blockPageZoom, true);
+    };
+  }, []);
+
   const resetTabLocalUi = useCallback(() => {
     setSelectedId(null);
     setSelectedVertIndex(null);
@@ -1949,7 +1981,7 @@ export default function ManualPage() {
             </span>
           </div>
 
-          <div ref={editorHostRef} className="relative min-h-0 flex-1 overflow-hidden">
+          <div ref={editorHostRef} className="relative min-h-0 flex-1 touch-none overflow-hidden">
             {project && (hasImage || project.shapes.length > 0 || project.shell || getBorders(project).length > 0) ? (
               <div className="absolute inset-0">
                 <ManualCanvas
