@@ -1052,6 +1052,11 @@ export function fillBorderGroup(
     }
   }
   if (!Number.isFinite(x0) || x1 - x0 < 1 || y1 - y0 < 1) return p;
+  const pad = Math.max(50, Math.max(x1 - x0, y1 - y0) * 0.1);
+  x0 -= pad;
+  y0 -= pad;
+  x1 += pad;
+  y1 += pad;
   const points: Point[] = [
     [x0, y0],
     [x1, y0],
@@ -1174,8 +1179,18 @@ export function contentBBox(project: ManualProject): {
     const ring = b.points?.length >= 3 ? b.points : flattenPolyVerts(borderVertsOf(b));
     consider(ring);
   }
+  const tree = getLayerTree(project);
   for (const s of project.shapes) {
     if (!isShapeVisible(project, s.id)) continue;
+    const leaf = leafForShape(tree, s.id);
+    if (leaf) {
+      const loc = findNode(tree, leaf.id);
+      const inClipped =
+        loc &&
+        (loc.ancestors.some((a) => a.borderGroup || (a.borderId && borderById(project, a.borderId)?.clip)) ||
+          (loc.parent && loc.parent.borderId && borderById(project, loc.parent.borderId)?.clip));
+      if (inClipped) continue;
+    }
     const ring =
       s.kind === "line"
         ? s.points?.length >= 2
