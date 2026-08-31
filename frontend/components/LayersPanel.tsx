@@ -28,6 +28,7 @@ type Props = {
   onNewContainer: () => void;
   onGroup: () => void;
   onDeleteNodes: () => void;
+  onDeleteSelected?: () => void;
   onSetActiveContainer: (id: string | null) => void;
   /** Move node under parentId (null = root) at model index. */
   onMoveNode: (id: string, parentId: string | null, index: number) => void;
@@ -65,16 +66,27 @@ function LockIcon({ on }: { on: boolean }) {
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
       {on ? (
         <>
-          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 10 0v4" />
         </>
       ) : (
         <>
-          <rect x="3" y="11" width="18" height="11" rx="2" />
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
           <path d="M7 11V7a5 5 0 0 1 9.9-1" />
         </>
       )}
     </svg>
+  );
+}
+
+function Chevron({ open }: { open: boolean }) {
+  return (
+    <span
+      className={`inline-block text-[10px] text-neutral-400 transition-transform ${open ? "rotate-90" : ""}`}
+      aria-hidden
+    >
+      ▶
+    </span>
   );
 }
 
@@ -106,6 +118,7 @@ export default function LayersPanel({
   onNewContainer,
   onGroup,
   onDeleteNodes,
+  onDeleteSelected,
   onSetActiveContainer,
   onMoveNode,
   onCollapseAll,
@@ -226,54 +239,52 @@ export default function LayersPanel({
           }}
           onDragEnd={clearDrag}
           onDragOver={(e) => {
-            if (!dragId || dragId === node.id) return;
-            const pos = posFromEvent(e, isContainer);
-            if (!dropAllowed(dragId, node.id, pos)) return;
+            if (!dragId) return;
             e.preventDefault();
-            e.stopPropagation();
-            setHint({ targetId: node.id, pos });
+            const pos = posFromEvent(e, isContainer);
+            if (dropAllowed(dragId, node.id, pos)) {
+              setHint({ targetId: node.id, pos });
+            }
           }}
           onDrop={(e) => {
             e.preventDefault();
-            e.stopPropagation();
             commitDrop();
           }}
-          className={showInto ? "rounded ring-1 ring-brand" : ""}
+          onContextMenu={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            setMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
+          }}
+          onClick={(e) => onSelectNode(node.id, e)}
+          onDoubleClick={(e) => {
+            e.stopPropagation();
+            if (isContainer) onSetActiveContainer(active ? null : node.id);
+            else onRenameNode(node.id);
+          }}
+          className={`group flex select-none items-center gap-1 rounded px-1.5 py-1 text-xs transition-colors ${
+            selected
+              ? "bg-brand text-white"
+              : active
+                ? "bg-brand/10 text-brand font-medium"
+                : "text-neutral-700 hover:bg-neutral-100"
+          } ${showInto ? "ring-2 ring-brand" : ""}`}
+          style={{ paddingLeft: `${depth * 12 + 6}px` }}
         >
-          <div
-            className={`flex items-center gap-0.5 rounded px-1 py-0.5 text-xs ${
-              selected ? "bg-brand-soft ring-1 ring-brand" : "hover:bg-neutral-100"
-            } ${active ? "font-semibold" : ""} ${locked ? "opacity-70" : ""}`}
-            style={{ paddingLeft: depth * 12 + 4 }}
-            onClick={(e) => {
-              onSelectNode(node.id, e);
-              if (isContainer) onSetActiveContainer(node.id);
-            }}
-            onDoubleClick={() => onRenameNode(node.id)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              e.stopPropagation();
-              if (!selectedIds.includes(node.id)) {
-                onSelectNode(node.id, e);
-                if (isContainer) onSetActiveContainer(node.id);
-              }
-              setMenu({ x: e.clientX, y: e.clientY, nodeId: node.id });
-            }}
-          >
-            {isContainer && node.children.length > 0 ? (
+          <div className="flex min-w-0 flex-1 items-center gap-1.5">
+            {isContainer ? (
               <button
                 type="button"
-                className="w-4 shrink-0 text-neutral-500"
+                className="p-0.5 text-neutral-400 hover:text-neutral-700"
                 onClick={(e) => {
                   e.stopPropagation();
                   onToggleCollapsed(node.id);
                 }}
                 title={collapsed ? "Expand" : "Collapse"}
               >
-                {collapsed ? "▸" : "▾"}
+                <Chevron open={!collapsed} />
               </button>
             ) : (
-              <span className="w-4 shrink-0" />
+              <span className="w-3" />
             )}
             <button
               type="button"
@@ -430,6 +441,13 @@ export default function LayersPanel({
     return items;
   };
 
+  const isBordersSel =
+    selectedIds.length >= 2 &&
+    selectedIds.every((id) => {
+      const f = findNode(tree, id);
+      return !!f && f.node.kind === "container" && !!f.node.borderId;
+    });
+
   return (
     <div onContextMenu={(e) => e.preventDefault()}>
       <div className="mb-2 flex flex-wrap gap-1">
@@ -437,7 +455,7 @@ export default function LayersPanel({
           type="button"
           onClick={onNewContainer}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300"
-          title="New group"
+          title="New empty group"
         >
           + Group
         </button>
@@ -447,16 +465,16 @@ export default function LayersPanel({
           disabled={!canGroup}
           className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-neutral-300 disabled:opacity-40"
           title={
-            selectedIds.length >= 2 &&
-            selectedIds.every((id) => {
-              const f = findNode(tree, id);
-              return !!f && f.node.kind === "container" && !!f.node.borderId;
-            })
+            isBordersSel
               ? "Group borders into a clip set (⌘G)"
               : "Group selection (⌘G)"
           }
         >
-          Group
+          {isBordersSel
+            ? "+ Border Group"
+            : selectedIds.length >= 1
+              ? "+ Group Sel"
+              : "+ Border Group"}
         </button>
         <button
           type="button"
@@ -466,6 +484,15 @@ export default function LayersPanel({
           title="Ungroup selected groups (shapes kept)"
         >
           Ungroup
+        </button>
+        <button
+          type="button"
+          onClick={onDeleteSelected}
+          disabled={selectedIds.length === 0}
+          className="rounded bg-neutral-200 px-2 py-1 text-[11px] hover:bg-red-100 hover:text-red-700 disabled:opacity-40 disabled:hover:bg-neutral-200 disabled:hover:text-inherit"
+          title="Delete selected layer(s) (Delete / Backspace)"
+        >
+          Delete
         </button>
         <button
           type="button"

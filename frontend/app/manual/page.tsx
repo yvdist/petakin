@@ -71,6 +71,7 @@ import {
   patchBorder,
   deleteBorder as removeBorder,
   deleteNodeDeep,
+  deleteNodesDeep,
   reorderNodeInParent,
   getPngScale,
   getShellStroke,
@@ -597,33 +598,91 @@ export default function ManualPage() {
     setSelectedVertIndex(null);
   }, [project, selectedId, selectedVertIndex, updateActive, updateShapeVerts]);
 
-  const deleteSelected = useCallback(() => {
-    if (!selectedId) return;
-    if (selectedId === SHELL_ID) {
-      if (!confirm("Delete shell? Units will no longer be clipped.")) return;
-      updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
+  const deleteAny = useCallback(
+    (id: string) => {
+      if (!project) return;
+      if (id === SHELL_ID) {
+        if (!confirm("Delete shell? Units will no longer be clipped.")) return;
+        updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
+        setSelectedId(null);
+        setSelectedVertIndex(null);
+        return;
+      }
+      const loc = findNode(getLayerTree(project), id);
+      if (loc) {
+        if (loc.node.kind === "leaf") {
+          if (!confirm("Delete this shape?")) return;
+          const sid = loc.node.shapeId;
+          updateActive(
+            (p) =>
+              removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== sid) }, sid),
+            { label: "Delete shape" },
+          );
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (loc.node.kind === "container" && loc.node.borderId) {
+          const borderId = loc.node.borderId;
+          if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+          updateActive((p) => removeBorder(p, borderId), { label: "Delete border" });
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (!confirm("Delete this group and everything inside?")) return;
+        updateActive((p) => deleteNodeDeep(p, id), { label: "Delete group" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (isBorderId(project, id)) {
+        if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+        updateActive((p) => removeBorder(p, id), { label: "Delete border" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (!project.shapes.some((s) => s.id === id)) return;
+      if (!confirm("Delete this shape?")) return;
+      updateActive(
+        (p) => removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== id) }, id),
+        { label: "Delete shape" },
+      );
       setSelectedId(null);
+      setSelectedNodeIds([]);
       setSelectedVertIndex(null);
+    },
+    [project, updateActive],
+  );
+
+  const deleteSelected = useCallback(() => {
+    if (!project) return;
+    if (selectedVertIndex != null) {
+      deleteVert();
       return;
     }
-    if (project && isBorderId(project, selectedId)) {
-      if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-      updateActive((p) => removeBorder(p, selectedId), { label: "Delete border" });
+    if (selectedNodeIds.length > 1) {
+      if (!confirm(`Delete ${selectedNodeIds.length} selected items?`)) return;
+      updateActive((p) => deleteNodesDeep(p, selectedNodeIds), { label: "Delete selected" });
       setSelectedId(null);
       setSelectedNodeIds([]);
       setSelectedVertIndex(null);
       return;
     }
-    if (!confirm("Delete this shape?")) return;
-    updateActive(
-      (p) =>
-        removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }, selectedId),
-      { label: "Delete shape" },
-    );
-    setSelectedId(null);
-    setSelectedNodeIds([]);
-    setSelectedVertIndex(null);
-  }, [project, selectedId, updateActive]);
+    if (selectedNodeIds.length === 1) {
+      deleteAny(selectedNodeIds[0]);
+      return;
+    }
+    if (selectedId) {
+      deleteAny(selectedId);
+      return;
+    }
+  }, [project, selectedVertIndex, deleteVert, selectedNodeIds, deleteAny, selectedId, updateActive]);
 
   const setShell = useCallback(
     (verts: PolyVert[]) => {
@@ -1069,68 +1128,6 @@ export default function ManualPage() {
       setSelectedNodeIds([]);
     },
     [project, nodeIdFromAny, updateActive],
-  );
-
-  const deleteAny = useCallback(
-    (id: string) => {
-      if (!project) return;
-      if (id === SHELL_ID) {
-        if (!confirm("Delete shell? Units will no longer be clipped.")) return;
-        updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
-        setSelectedId(null);
-        setSelectedVertIndex(null);
-        return;
-      }
-      const loc = findNode(getLayerTree(project), id);
-      if (loc) {
-        if (loc.node.kind === "leaf") {
-          if (!confirm("Delete this shape?")) return;
-          const sid = loc.node.shapeId;
-          updateActive(
-            (p) =>
-              removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== sid) }, sid),
-            { label: "Delete shape" },
-          );
-          setSelectedId(null);
-          setSelectedNodeIds([]);
-          setSelectedVertIndex(null);
-          return;
-        }
-        if (loc.node.kind === "container" && loc.node.borderId) {
-          const borderId = loc.node.borderId;
-          if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-          updateActive((p) => removeBorder(p, borderId), { label: "Delete border" });
-          setSelectedId(null);
-          setSelectedNodeIds([]);
-          setSelectedVertIndex(null);
-          return;
-        }
-        if (!confirm("Delete this group and everything inside?")) return;
-        updateActive((p) => deleteNodeDeep(p, id), { label: "Delete group" });
-        setSelectedId(null);
-        setSelectedNodeIds([]);
-        setSelectedVertIndex(null);
-        return;
-      }
-      if (isBorderId(project, id)) {
-        if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-        updateActive((p) => removeBorder(p, id), { label: "Delete border" });
-        setSelectedId(null);
-        setSelectedNodeIds([]);
-        setSelectedVertIndex(null);
-        return;
-      }
-      if (!project.shapes.some((s) => s.id === id)) return;
-      if (!confirm("Delete this shape?")) return;
-      updateActive(
-        (p) => removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== id) }, id),
-        { label: "Delete shape" },
-      );
-      setSelectedId(null);
-      setSelectedNodeIds([]);
-      setSelectedVertIndex(null);
-    },
-    [project, updateActive],
   );
 
   // ---- export ----
@@ -2320,6 +2317,7 @@ export default function ManualPage() {
                         onNewContainer={doNewContainer}
                         onGroup={doGroup}
                         onDeleteNodes={doDeleteNodes}
+                        onDeleteSelected={deleteSelected}
                         onSetActiveContainer={onSetActiveContainer}
                         onMoveNode={onMoveNodeCb}
                         onCollapseAll={onCollapseAll}

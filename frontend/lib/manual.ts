@@ -1013,6 +1013,17 @@ export function deleteNodeDeep(project: ManualProject, nodeId: string): ManualPr
   });
 }
 
+/** Deep delete multiple nodes sequentially. */
+export function deleteNodesDeep(project: ManualProject, nodeIds: string[]): ManualProject {
+  let p = project;
+  for (const id of nodeIds) {
+    if (findNode(getLayerTree(p), id)) {
+      p = deleteNodeDeep(p, id);
+    }
+  }
+  return p;
+}
+
 export function borderGroupClipVerts(project: ManualProject, node: ManualContainerNode): PolyVert[][] {
   return directChildBorders(project, node)
     .map(borderVertsOf)
