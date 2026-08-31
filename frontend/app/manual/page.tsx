@@ -41,6 +41,9 @@ import {
   computeExportLayout,
   createContainer,
   createBorder,
+  collectSelectedCanvasIds,
+  curveLineVerts,
+  straightenLineVerts,
   defaultBadgeLayoutForCanvas,
   defaultFill,
   deleteContainers,
@@ -71,6 +74,7 @@ import {
   patchBorder,
   deleteBorder as removeBorder,
   deleteNodeDeep,
+  deleteNodesDeep,
   reorderNodeInParent,
   getPngScale,
   getShellStroke,
@@ -597,33 +601,91 @@ export default function ManualPage() {
     setSelectedVertIndex(null);
   }, [project, selectedId, selectedVertIndex, updateActive, updateShapeVerts]);
 
-  const deleteSelected = useCallback(() => {
-    if (!selectedId) return;
-    if (selectedId === SHELL_ID) {
-      if (!confirm("Delete shell? Units will no longer be clipped.")) return;
-      updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
+  const deleteAny = useCallback(
+    (id: string) => {
+      if (!project) return;
+      if (id === SHELL_ID) {
+        if (!confirm("Delete shell? Units will no longer be clipped.")) return;
+        updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
+        setSelectedId(null);
+        setSelectedVertIndex(null);
+        return;
+      }
+      const loc = findNode(getLayerTree(project), id);
+      if (loc) {
+        if (loc.node.kind === "leaf") {
+          if (!confirm("Delete this shape?")) return;
+          const sid = loc.node.shapeId;
+          updateActive(
+            (p) =>
+              removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== sid) }, sid),
+            { label: "Delete shape" },
+          );
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (loc.node.kind === "container" && loc.node.borderId) {
+          const borderId = loc.node.borderId;
+          if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+          updateActive((p) => removeBorder(p, borderId), { label: "Delete border" });
+          setSelectedId(null);
+          setSelectedNodeIds([]);
+          setSelectedVertIndex(null);
+          return;
+        }
+        if (!confirm("Delete this group and everything inside?")) return;
+        updateActive((p) => deleteNodeDeep(p, id), { label: "Delete group" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (isBorderId(project, id)) {
+        if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
+        updateActive((p) => removeBorder(p, id), { label: "Delete border" });
+        setSelectedId(null);
+        setSelectedNodeIds([]);
+        setSelectedVertIndex(null);
+        return;
+      }
+      if (!project.shapes.some((s) => s.id === id)) return;
+      if (!confirm("Delete this shape?")) return;
+      updateActive(
+        (p) => removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== id) }, id),
+        { label: "Delete shape" },
+      );
       setSelectedId(null);
+      setSelectedNodeIds([]);
       setSelectedVertIndex(null);
+    },
+    [project, updateActive],
+  );
+
+  const deleteSelected = useCallback(() => {
+    if (!project) return;
+    if (selectedVertIndex != null) {
+      deleteVert();
       return;
     }
-    if (project && isBorderId(project, selectedId)) {
-      if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-      updateActive((p) => removeBorder(p, selectedId), { label: "Delete border" });
+    if (selectedNodeIds.length > 1) {
+      if (!confirm(`Delete ${selectedNodeIds.length} selected items?`)) return;
+      updateActive((p) => deleteNodesDeep(p, selectedNodeIds), { label: "Delete selected" });
       setSelectedId(null);
       setSelectedNodeIds([]);
       setSelectedVertIndex(null);
       return;
     }
-    if (!confirm("Delete this shape?")) return;
-    updateActive(
-      (p) =>
-        removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== selectedId) }, selectedId),
-      { label: "Delete shape" },
-    );
-    setSelectedId(null);
-    setSelectedNodeIds([]);
-    setSelectedVertIndex(null);
-  }, [project, selectedId, updateActive]);
+    if (selectedNodeIds.length === 1) {
+      deleteAny(selectedNodeIds[0]);
+      return;
+    }
+    if (selectedId) {
+      deleteAny(selectedId);
+      return;
+    }
+  }, [project, selectedVertIndex, deleteVert, selectedNodeIds, deleteAny, selectedId, updateActive]);
 
   const setShell = useCallback(
     (verts: PolyVert[]) => {
@@ -730,11 +792,43 @@ export default function ManualPage() {
       (p) => ({ ...p, lineDefaults: { ...getLineDefaults(p), ...patch } }),
       { label: "Line style", history: "coalesce" },
     );
-  const patchLineShape = (id: string, patch: Pick<ManualShape, "stroke" | "dash">) =>
+  const patchLineShape = (
+    id: string,
+    patch: {
+      stroke?: { color?: string; width?: number; opacity?: number };
+      dash?: "solid" | "dash";
+      opacity?: number;
+    },
+  ) =>
     updateActive(
       (p) => ({
         ...p,
-        shapes: p.shapes.map((s) => (s.id === id ? { ...s, ...patch } : s)),
+        shapes: p.shapes.map((s) =>
+          s.id === id
+            ? {
+                ...s,
+                stroke: {
+                  color: patch.stroke?.color ?? s.stroke?.color ?? lineDefaults.color,
+                  width: patch.stroke?.width ?? s.stroke?.width ?? lineDefaults.width,
+                  opacity:
+                    patch.stroke?.opacity ??
+                    s.stroke?.opacity ??
+                    patch.opacity ??
+                    s.opacity ??
+                    lineDefaults.opacity ??
+                    1,
+                },
+                dash: patch.dash ?? s.dash ?? lineDefaults.dash,
+                opacity:
+                  patch.opacity ??
+                  patch.stroke?.opacity ??
+                  s.opacity ??
+                  s.stroke?.opacity ??
+                  lineDefaults.opacity ??
+                  1,
+              }
+            : s,
+        ),
       }),
       { label: "Edit line", history: "coalesce" },
     );
@@ -754,6 +848,11 @@ export default function ManualPage() {
 
   // Flat display order (front → back) for Shift+click range selection.
   const panelRows = useMemo(() => (project ? displayRowOrder(project) : []), [project]);
+
+  const selectedCanvasIds = useMemo(
+    () => collectSelectedCanvasIds(project, selectedNodeIds, selectedId),
+    [project, selectedNodeIds, selectedId],
+  );
 
   const onSelectNode = useCallback(
     (id: string, e: React.MouseEvent) => {
@@ -1069,68 +1168,6 @@ export default function ManualPage() {
       setSelectedNodeIds([]);
     },
     [project, nodeIdFromAny, updateActive],
-  );
-
-  const deleteAny = useCallback(
-    (id: string) => {
-      if (!project) return;
-      if (id === SHELL_ID) {
-        if (!confirm("Delete shell? Units will no longer be clipped.")) return;
-        updateActive((p) => ({ ...p, shell: null, shellVerts: null }), { label: "Delete shell" });
-        setSelectedId(null);
-        setSelectedVertIndex(null);
-        return;
-      }
-      const loc = findNode(getLayerTree(project), id);
-      if (loc) {
-        if (loc.node.kind === "leaf") {
-          if (!confirm("Delete this shape?")) return;
-          const sid = loc.node.shapeId;
-          updateActive(
-            (p) =>
-              removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== sid) }, sid),
-            { label: "Delete shape" },
-          );
-          setSelectedId(null);
-          setSelectedNodeIds([]);
-          setSelectedVertIndex(null);
-          return;
-        }
-        if (loc.node.kind === "container" && loc.node.borderId) {
-          const borderId = loc.node.borderId;
-          if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-          updateActive((p) => removeBorder(p, borderId), { label: "Delete border" });
-          setSelectedId(null);
-          setSelectedNodeIds([]);
-          setSelectedVertIndex(null);
-          return;
-        }
-        if (!confirm("Delete this group and everything inside?")) return;
-        updateActive((p) => deleteNodeDeep(p, id), { label: "Delete group" });
-        setSelectedId(null);
-        setSelectedNodeIds([]);
-        setSelectedVertIndex(null);
-        return;
-      }
-      if (isBorderId(project, id)) {
-        if (!confirm("Delete this border? Contents stay, the clip group is removed.")) return;
-        updateActive((p) => removeBorder(p, id), { label: "Delete border" });
-        setSelectedId(null);
-        setSelectedNodeIds([]);
-        setSelectedVertIndex(null);
-        return;
-      }
-      if (!project.shapes.some((s) => s.id === id)) return;
-      if (!confirm("Delete this shape?")) return;
-      updateActive(
-        (p) => removeLeafForShape({ ...p, shapes: p.shapes.filter((s) => s.id !== id) }, id),
-        { label: "Delete shape" },
-      );
-      setSelectedId(null);
-      setSelectedNodeIds([]);
-      setSelectedVertIndex(null);
-    },
-    [project, updateActive],
   );
 
   // ---- export ----
@@ -1703,22 +1740,29 @@ export default function ManualPage() {
             const editing = !!(selShape && isLineShape(selShape));
             const color = editing ? (selShape!.stroke?.color ?? lineDefaults.color) : lineDefaults.color;
             const width = editing ? (selShape!.stroke?.width ?? lineDefaults.width) : lineDefaults.width;
+            const opacity = editing
+              ? (selShape!.stroke?.opacity ?? selShape!.opacity ?? lineDefaults.opacity ?? 1)
+              : (lineDefaults.opacity ?? 1);
             const dash = editing ? (selShape!.dash ?? "solid") : lineDefaults.dash;
-            const apply = (patch: { color?: string; width?: number; dash?: "solid" | "dash" }) => {
+            const apply = (patch: { color?: string; width?: number; opacity?: number; dash?: "solid" | "dash" }) => {
               const next = {
                 color: patch.color ?? color,
                 width: patch.width ?? width,
+                opacity: patch.opacity ?? opacity,
                 dash: patch.dash ?? dash,
               };
               if (editing && selShape) {
                 patchLineShape(selShape.id, {
-                  stroke: { color: next.color, width: next.width },
+                  stroke: { color: next.color, width: next.width, opacity: next.opacity },
                   dash: next.dash,
+                  opacity: next.opacity,
                 });
               } else {
                 setLineDefault(next);
               }
             };
+            const currentVerts = editing && selShape ? shapeVerts(selShape) : [];
+            const isCurved = currentVerts.some((v) => !!v.handleOut);
             return (
               <Section title="Line">
                 <p className="mb-2 text-xs text-neutral-600">
@@ -1749,6 +1793,19 @@ export default function ManualPage() {
                   <span className="w-6 font-mono">{width}</span>
                   px
                 </label>
+                <label className="mb-2 flex items-center gap-2 text-xs text-neutral-700">
+                  Opacity
+                  <input
+                    type="range"
+                    min={10}
+                    max={100}
+                    step={5}
+                    value={Math.round(opacity * 100)}
+                    onChange={(e) => apply({ opacity: Number(e.target.value) / 100 })}
+                    className="w-24 accent-brand"
+                  />
+                  <span className="w-8 font-mono">{Math.round(opacity * 100)}%</span>
+                </label>
                 <div className="mb-2 flex gap-1">
                   {(["solid", "dash"] as const).map((d) => (
                     <button
@@ -1756,13 +1813,48 @@ export default function ManualPage() {
                       type="button"
                       onClick={() => apply({ dash: d })}
                       className={`flex-1 rounded px-2 py-1 text-xs capitalize ${
-                        dash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700"
+                        dash === d ? "bg-brand text-white" : "bg-neutral-200 text-neutral-700 hover:bg-neutral-300"
                       }`}
                     >
                       {d}
                     </button>
                   ))}
                 </div>
+                {editing && selShape && (
+                  <div className="mb-2">
+                    <span className="mb-1 block text-xs text-neutral-600">Curve</span>
+                    <div className="flex gap-1">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          updateShapeVerts(selShape.id, straightenLineVerts(currentVerts));
+                        }}
+                        className={`flex-1 rounded px-2 py-1 text-xs ${
+                          !isCurved
+                            ? "bg-brand text-white"
+                            : "bg-neutral-200 text-neutral-700 hover:bg-neutral-300"
+                        }`}
+                        title="Make straight line"
+                      >
+                        Straight
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          updateShapeVerts(selShape.id, curveLineVerts(currentVerts));
+                        }}
+                        className={`flex-1 rounded px-2 py-1 text-xs ${
+                          isCurved
+                            ? "bg-brand text-white"
+                            : "bg-neutral-200 text-neutral-700 hover:bg-neutral-300"
+                        }`}
+                        title="Bend into smooth curve"
+                      >
+                        Curved ∿
+                      </button>
+                    </div>
+                  </div>
+                )}
                 <button
                   type="button"
                   className="text-[11px] text-neutral-500 hover:underline"
@@ -1770,11 +1862,12 @@ export default function ManualPage() {
                     apply({
                       color: DEFAULT_LINE_STROKE.color,
                       width: DEFAULT_LINE_STROKE.width,
+                      opacity: 1,
                       dash: "solid",
                     })
                   }
                 >
-                  Reset to dark / 3px / solid
+                  Reset to dark / 3px / 100% / solid
                 </button>
               </Section>
             );
@@ -2248,6 +2341,7 @@ export default function ManualPage() {
                   snap={snap}
                   gridSize={gridSize}
                   selectedId={selectedId}
+                  selectedIds={selectedCanvasIds}
                   selectedVertIndex={selectedVertIndex}
                   makeShape={makeShape}
                   onSelect={selectId}
@@ -2320,6 +2414,7 @@ export default function ManualPage() {
                         onNewContainer={doNewContainer}
                         onGroup={doGroup}
                         onDeleteNodes={doDeleteNodes}
+                        onDeleteSelected={deleteSelected}
                         onSetActiveContainer={onSetActiveContainer}
                         onMoveNode={onMoveNodeCb}
                         onCollapseAll={onCollapseAll}
