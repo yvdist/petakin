@@ -24,6 +24,7 @@ export interface ManualShape {
   /** Per-shape stroke (lines). Tenant units use project.stroke instead. */
   stroke?: ManualStroke;
   dash?: "solid" | "dash";
+  opacity?: number;
 }
 
 /** Inner clip-region + grouper. Multiple allowed; referenced from a container node. */
@@ -42,6 +43,7 @@ export interface ManualBorder {
 export interface ManualStroke {
   color: string;
   width: number; // image-pixel space
+  opacity?: number;
 }
 
 export interface ManualProject {
@@ -837,7 +839,7 @@ export function getShellStroke(project: ManualProject | null | undefined): Manua
   };
 }
 
-export type LineStyle = ManualStroke & { dash: "solid" | "dash" };
+export type LineStyle = ManualStroke & { dash: "solid" | "dash"; opacity?: number };
 
 export function getLineDefaults(project: ManualProject | null | undefined): LineStyle {
   const s = project?.lineDefaults;
@@ -845,6 +847,7 @@ export function getLineDefaults(project: ManualProject | null | undefined): Line
     color: typeof s?.color === "string" && s.color ? s.color : DEFAULT_LINE_STROKE.color,
     width: Math.max(1, Math.min(24, Number(s?.width) || DEFAULT_LINE_STROKE.width)),
     dash: s?.dash === "dash" ? "dash" : "solid",
+    opacity: typeof s?.opacity === "number" ? Math.max(0.05, Math.min(1, s.opacity)) : 1,
   };
 }
 
@@ -858,15 +861,70 @@ export function dashArray(width: number, dash: "solid" | "dash" | undefined): st
   return `${(w * 3).toFixed(2)} ${(w * 2).toFixed(2)}`;
 }
 
-export function shapeLineStroke(s: ManualShape, project: ManualProject | null | undefined): ManualStroke {
-  if (s.stroke && s.stroke.color) {
-    return {
-      color: s.stroke.color,
-      width: Math.max(1, Math.min(24, Number(s.stroke.width) || DEFAULT_LINE_STROKE.width)),
-    };
-  }
+export function shapeLineStroke(s: ManualShape, project: ManualProject | null | undefined): LineStyle {
   const d = getLineDefaults(project);
-  return { color: d.color, width: d.width };
+  const color = s.stroke?.color ?? d.color;
+  const width = Math.max(1, Math.min(24, Number(s.stroke?.width) || d.width));
+  const dash = s.dash ?? d.dash;
+  const opacity =
+    typeof s.stroke?.opacity === "number"
+      ? Math.max(0.05, Math.min(1, s.stroke.opacity))
+      : typeof s.opacity === "number"
+        ? Math.max(0.05, Math.min(1, s.opacity))
+        : (d.opacity ?? 1);
+  return { color, width, dash, opacity };
+}
+
+/** Automatically bend straight line vertices into a smooth curve. */
+export function curveLineVerts(verts: PolyVert[]): PolyVert[] {
+  if (verts.length < 2) return verts;
+  return verts.map((v, i) => {
+    if (i === verts.length - 1) return { p: [v.p[0], v.p[1]] as Point };
+    const next = verts[i + 1].p;
+    const mid: Point = [(v.p[0] + next[0]) / 2, (v.p[1] + next[1]) / 2];
+    const dx = next[0] - v.p[0];
+    const dy = next[1] - v.p[1];
+    const len = Math.hypot(dx, dy);
+    if (len < 1) return { p: [v.p[0], v.p[1]] as Point, handleOut: mid };
+    const nx = -dy / len;
+    const ny = dx / len;
+    const offset = len * 0.25;
+    const handleOut: Point = [mid[0] + nx * offset, mid[1] + ny * offset];
+    return { p: [v.p[0], v.p[1]] as Point, handleOut };
+  });
+}
+
+/** Straighten curved line vertices by removing bezier handles. */
+export function straightenLineVerts(verts: PolyVert[]): PolyVert[] {
+  return verts.map((v) => ({ p: [v.p[0], v.p[1]] as Point }));
+}
+
+/** Collect all canvas-level ids (shapes + borders) corresponding to selected node ids and/or selectedId. */
+export function collectSelectedCanvasIds(
+  project: ManualProject | null | undefined,
+  selectedNodeIds: string[],
+  selectedId: string | null,
+): string[] {
+  if (!project) return selectedId ? [selectedId] : [];
+  const set = new Set<string>();
+  if (selectedId) set.add(selectedId);
+  const tree = getLayerTree(project);
+  for (const nid of selectedNodeIds) {
+    const loc = findNode(tree, nid);
+    if (!loc) {
+      set.add(nid);
+      continue;
+    }
+    const walk = (n: ManualNode) => {
+      if (n.kind === "leaf") set.add(n.shapeId);
+      else {
+        if (n.borderId) set.add(n.borderId);
+        for (const c of n.children) walk(c);
+      }
+    };
+    walk(loc.node);
+  }
+  return Array.from(set);
 }
 
 export type BorderStyle = ManualStroke & { dash: "solid" | "dash" };
@@ -1852,10 +1910,12 @@ export function emitManualSvg(
       const sw = ls.width * scale;
       const dash = dashArray(sw, s.dash);
       const dashAttr = dash ? ` stroke-dasharray="${dash}"` : "";
+      const opacAttr =
+        ls.opacity !== undefined && ls.opacity < 1 ? ` stroke-opacity="${ls.opacity.toFixed(2)}"` : "";
       o.push(
         `${indent}<path id="${id}" data-kind="line" data-family="line" fill="none" ` +
           `stroke="${ls.color}" stroke-width="${sw.toFixed(2)}" stroke-linejoin="round" ` +
-          `stroke-linecap="round"${dashAttr} d="${dd}"/>`,
+          `stroke-linecap="round"${dashAttr}${opacAttr} d="${dd}"/>`,
       );
       return;
     }

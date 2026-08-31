@@ -1,5 +1,5 @@
 "use client";
-import { useCallback, useEffect, useRef, useState, MouseEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, MouseEvent } from "react";
 import type { Category, Point } from "@/lib/types";
 import {
   bendEdge,
@@ -70,6 +70,7 @@ interface Props {
   snap: boolean;
   gridSize: number;
   selectedId: string | null;
+  selectedIds?: string[];
   selectedVertIndex: number | null;
   makeShape: (kind: ShapeKind, points: Point[], verts?: PolyVert[]) => ManualShape;
   onSelect: (id: string | null) => void;
@@ -187,6 +188,7 @@ export default function ManualCanvas({
   snap,
   gridSize,
   selectedId,
+  selectedIds,
   selectedVertIndex,
   makeShape,
   onSelect,
@@ -219,6 +221,15 @@ export default function ManualCanvas({
   const badgeSrcR = badge.r / exportLayout.scale;
   const badgeFontSrc = badge.fontSize / exportLayout.scale;
   const badgeStrokeSrc = badge.strokeWidth / exportLayout.scale;
+
+  const selectedIdSet = useMemo(() => {
+    const set = new Set<string>();
+    if (selectedId) set.add(selectedId);
+    if (selectedIds) {
+      for (const id of selectedIds) set.add(id);
+    }
+    return set;
+  }, [selectedId, selectedIds]);
   const paintOrder = orderedShapeIds(project)
     .map((id) => shapes.find((s) => s.id === id))
     .filter((s): s is ManualShape => !!s && isShapeVisible(project, s.id));
@@ -1077,7 +1088,7 @@ export default function ManualCanvas({
     live && live.id === id ? live.verts : fallback;
 
   const shellLive = shellV ? liveVertsFor(SHELL_ID, shellV) : null;
-  const isShellSel = selectedId === SHELL_ID;
+  const isShellSel = selectedIdSet.has(SHELL_ID);
 
   const selectedBorder = selectedId && isBorderId(project, selectedId) ? borderById(project, selectedId) : null;
   const selectedShape =
@@ -1158,14 +1169,15 @@ export default function ManualCanvas({
       if (n.kind === "leaf") {
         const s = shapes.find((x) => x.id === n.shapeId);
         if (!s || !isShapeVisible(project, s.id)) return null;
-        const dim = dimForAncestors(ancestors);
         const verts = liveVertsFor(s.id, shapeVerts(s));
         if (isLineShape(s)) {
-          const isSel = s.id === selectedId;
+          const isSel = selectedIdSet.has(s.id);
           const isHov = hovered === s.id;
           const ls = shapeLineStroke(s, project);
           const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
           const sw = isSel ? ls.width * 1.6 : ls.width;
+          const strokeOpacity = ls.opacity ?? 1;
+          const dim = !isSel && dimForAncestors(ancestors);
           return (
             <path
               key={`f-${s.id}`}
@@ -1173,14 +1185,17 @@ export default function ManualCanvas({
               fill="none"
               stroke={stroke}
               strokeWidth={sw}
-              strokeDasharray={dashArray(sw, s.dash)}
+              strokeDasharray={dashArray(sw, s.dash ?? ls.dash)}
               strokeLinejoin="round"
               strokeLinecap="round"
+              strokeOpacity={strokeOpacity}
               opacity={dim ? 0.4 : 1}
               pointerEvents="none"
             />
           );
         }
+        const isSel = selectedIdSet.has(s.id);
+        const dim = !isSel && dimForAncestors(ancestors);
         return (
           <path
             key={`f-${s.id}`}
@@ -1217,9 +1232,9 @@ export default function ManualCanvas({
       if (n.kind === "leaf") {
         const s = shapes.find((x) => x.id === n.shapeId);
         if (!s || !isShapeVisible(project, s.id) || isLineShape(s)) return null;
-        const dim = dimForAncestors(ancestors);
         const verts = liveVertsFor(s.id, shapeVerts(s));
-        const isSel = s.id === selectedId;
+        const isSel = selectedIdSet.has(s.id);
+        const dim = !isSel && dimForAncestors(ancestors);
         const isHov = hovered === s.id;
         const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
         const sw = isSel ? strokeW * 1.6 : strokeW;
@@ -1263,7 +1278,7 @@ export default function ManualCanvas({
       if (!isNodeVisible(project, n.id)) return null;
       const border = n.borderId ? borderById(project, n.borderId) : null;
       const bv = border ? liveVertsFor(border.id, borderVertsOf(border)) : null;
-      const isSel = border ? selectedId === border.id : false;
+      const isSel = border ? selectedIdSet.has(border.id) : false;
       return (
         <g key={`bo-${n.id}`}>
           {bv && bv.length >= 2 && border && (
