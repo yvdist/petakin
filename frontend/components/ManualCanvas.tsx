@@ -1152,17 +1152,6 @@ export default function ManualCanvas({
       : [];
 
   const layerTree = getLayerTree(project);
-  const activeClipContainerId = (() => {
-    const id = layerTree.activeContainerId;
-    if (!id) return null;
-    const f = findNode(layerTree, id);
-    if (!f || f.node.kind !== "container") return null;
-    if (isBorderGroup(f.node)) return id;
-    if (tool === "border" && f.node.borderId) return id;
-    return null;
-  })();
-  const dimForAncestors = (ancestors: string[]) =>
-    !!activeClipContainerId && !ancestors.includes(activeClipContainerId);
 
   const paintFills = (nodes: ManualNode[], ancestors: string[]): React.ReactNode =>
     nodes.map((n) => {
@@ -1177,7 +1166,6 @@ export default function ManualCanvas({
           const stroke = isSel ? BRAND : isHov ? "#111827" : ls.color;
           const sw = isSel ? ls.width * 1.6 : ls.width;
           const strokeOpacity = ls.opacity ?? 1;
-          const dim = !isSel && dimForAncestors(ancestors);
           return (
             <path
               key={`f-${s.id}`}
@@ -1189,20 +1177,18 @@ export default function ManualCanvas({
               strokeLinejoin="round"
               strokeLinecap="round"
               strokeOpacity={strokeOpacity}
-              opacity={dim ? 0.4 : 1}
               pointerEvents="none"
             />
           );
         }
-        const isSel = selectedIdSet.has(s.id);
-        const dim = !isSel && dimForAncestors(ancestors);
+        const opac = typeof s.opacity === "number" ? s.opacity : 1;
         return (
           <path
             key={`f-${s.id}`}
             d={pathDFromVerts(verts)}
             fill={s.fill || defaultFill(s.category)}
             stroke="none"
-            opacity={dim ? 0.4 : 1}
+            opacity={opac}
             pointerEvents="none"
           />
         );
@@ -1234,7 +1220,6 @@ export default function ManualCanvas({
         if (!s || !isShapeVisible(project, s.id) || isLineShape(s)) return null;
         const verts = liveVertsFor(s.id, shapeVerts(s));
         const isSel = selectedIdSet.has(s.id);
-        const dim = !isSel && dimForAncestors(ancestors);
         const isHov = hovered === s.id;
         const stroke = isSel ? BRAND : isHov ? "#111827" : tenantStroke.color;
         const sw = isSel ? strokeW * 1.6 : strokeW;
@@ -1247,7 +1232,6 @@ export default function ManualCanvas({
             strokeWidth={sw}
             strokeLinejoin="round"
             strokeLinecap="round"
-            opacity={dim ? 0.4 : 1}
             pointerEvents="none"
           />
         );
