@@ -1,16 +1,45 @@
 # Petakin — Floor Plan → Flat SVG
 
-Turn raster mall floor plans (screenshot/PDF export, colored-by-category, full of
-unit-code text + facility icons + watermarks) into clean **flat color-block SVGs**:
-one `<path>` polygon per unit, solid fill, thin white separators, no text/icons,
-transparent background, floor-label badge. Built for repeatable use — 5 floors per
-mall, many malls — with **presets** so every floor stays style-identical.
+Turn raster mall floor plans (a screenshot or PDF export, coloured by category, full of
+unit-code text, facility icons and watermarks) into clean **flat colour-block SVGs**:
+one `<path>` per unit, grouped by category, with a transparent background and no
+embedded raster. Built for repeatable use, several floors per mall and many malls, so
+every floor stays style-identical.
 
-Local-only. No third-party services.
+Live at [petakin.vercel.app](https://petakin.vercel.app).
+
+## Modes
+
+| Mode | Status | What it does |
+|---|---|---|
+| **Manual** (`/manual`) | Live, the main product | Draw units over the real floor plan as an underlay, then export SVG |
+| **Auto** (`/auto`) | Being rebuilt | Extracts units from the image by colour segmentation |
+
+Manual mode is the headline because vendor plans are often messy and inconsistent across
+floors. Drawing over an underlay gives unit-by-unit control and is more dependable for
+production work than an automatic trace.
+
+## Manual mode
+
+Runs entirely in the browser. No backend is needed.
+
+- **Underlay**: upload a PNG or JPG of the floor plan and draw on top of it, with separate
+  opacity for the underlay and the drawing.
+- **Tools**: select, shell, rectangle, ellipse, polygon (curves included), line, border and
+  badge, on a snap grid.
+- **Categories**: each unit is drawn as a category (food and beverages, fashion, services,
+  anchor store, vacant, parking and so on), which sets its colour and its SVG group.
+- **Layers**: a layers panel with groups, multi-select, reordering and delete.
+- **Floors**: one tab per floor with a uniform style across tabs.
+- **Persistence**: the workspace autosaves to `localStorage`, with undo and redo. A floor or
+  the whole workspace can be exported and imported as JSON, and a lost project can be
+  recovered from an exported SVG.
+- **Output**: pure vector SVG with one group per category and one ID per unit, so every
+  path can be selected in Figma or Illustrator.
 
 ## Stack
 
-- **Backend** — Python + FastAPI. The validated segmentation-per-color algorithm
+- **Backend** (Auto mode only) — Python + FastAPI. The validated segmentation-per-color algorithm
   (numpy / scipy.ndimage / opencv). Emits normalized geometry + grouped SVG.
 - **Frontend** — Next.js (App Router) + TypeScript + Tailwind. Left control panel,
   right live SVG editor (zoom/pan, hover, click-edit, multi-select merge/delete,
@@ -23,7 +52,7 @@ frontend/  app/{page,batch}  components/*  lib/{types,presets,api,geometry}.ts
 
 ## Run
 
-Two terminals.
+Manual mode needs only the frontend. Auto mode needs both, in two terminals.
 
 **Backend** (port 8000):
 ```bash
@@ -42,7 +71,10 @@ npm run dev
 
 Open http://localhost:3000. Override backend host with `PETAKIN_BACKEND=...`.
 
-## How it works (algorithm)
+## Auto mode: how the extraction works
+
+Auto mode is being rebuilt while segmentation and presets are tightened. The notes below
+describe the validated algorithm it is built on.
 
 1. **Detect palette** — exact-RGB frequency; colors with share > 0.1% become swatches.
 2. **Classify pixels** — nearest palette color (Euclidean RGB), valid only if distance
